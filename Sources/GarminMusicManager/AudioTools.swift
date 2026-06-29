@@ -144,7 +144,7 @@ enum AudioConverter {
             _ = try CommandRunner.run("ffmpeg", arguments: args, timeoutSeconds: 600)
             return outputURL
         } catch {
-            throw AppError.conversionFailed(error.debugDescription)
+            throw AppError.conversionFailed(String(describing: error))
         }
     }
 }
@@ -164,7 +164,7 @@ enum MetadataRepairer {
             _ = try CommandRunner.run("ffmpeg", arguments: args, timeoutSeconds: 300)
             return outputURL
         } catch {
-            throw AppError.metadataRepairFailed(error.debugDescription)
+            throw AppError.metadataRepairFailed(String(describing: error))
         }
     }
 }
