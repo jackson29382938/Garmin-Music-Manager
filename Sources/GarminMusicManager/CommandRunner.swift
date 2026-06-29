@@ -67,7 +67,6 @@ enum CommandRunner {
         if process.isRunning {
             process.terminate()
             Thread.sleep(forTimeInterval: 0.2)
-            if process.isRunning { process.interrupt() }
         }
 
         process.waitUntilExit()
