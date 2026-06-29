@@ -461,11 +461,16 @@ struct DeviceChoiceRow: View {
 
             Spacer()
 
-            Button(isSelected ? "Selected" : "Use") {
-                action()
+            if isSelected {
+                Button("Selected") { }
+                    .buttonStyle(.bordered)
+                    .disabled(true)
+            } else {
+                Button("Use") {
+                    action()
+                }
+                .buttonStyle(.borderedProminent)
             }
-            .buttonStyle(isSelected ? .bordered : .borderedProminent)
-            .disabled(isSelected)
         }
         .padding(12)
         .background(
@@ -553,7 +558,7 @@ struct SectionCard<Content: View>: View {
     let title: String
     let subtitle: String
     let systemImage: String
-    @ViewBuilder let content: Content
+    let content: Content
 
     init(title: String, subtitle: String, systemImage: String, @ViewBuilder content: () -> Content) {
         self.title = title
