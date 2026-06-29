@@ -12,248 +12,775 @@ struct GarminMusicManagerApp: App {
             ContentView()
                 .environmentObject(model)
         }
+        .windowStyle(.hiddenTitleBar)
     }
 }
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppViewModel
 
+    private let dashboardColumns = [
+        GridItem(.flexible(minimum: 320), spacing: 16),
+        GridItem(.flexible(minimum: 320), spacing: 16)
+    ]
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            header
-            destinationSection
-            librarySection
-            trackSection
-            actionBar
-            logSection
+        ZStack {
+            LinearGradient(
+                colors: [
+                    Color(nsColor: .windowBackgroundColor),
+                    Color.accentColor.opacity(0.08)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            )
+            .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                hero
+
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        workflowStrip
+
+                        LazyVGrid(columns: dashboardColumns, alignment: .leading, spacing: 16) {
+                            DestinationCard()
+                            LibraryCard()
+                        }
+
+                        TracksCard()
+                        SyncCard()
+                        StatusLogCard()
+                    }
+                    .padding(24)
+                }
+            }
         }
-        .padding(20)
-        .frame(minWidth: 940, minHeight: 680)
+        .frame(minWidth: 1080, minHeight: 760)
         .onAppear {
             model.scanDevices()
         }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Garmin Music Manager")
-                .font(.largeTitle.bold())
-            Text("Copy local music to a Garmin watch folder and generate a simple playlist.")
-                .foregroundStyle(.secondary)
-        }
-    }
-
-    private var destinationSection: some View {
-        GroupBox("Watch / Destination") {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Button("Rescan Garmin Volumes") {
-                        model.scanDevices()
-                    }
-                    Button("Choose Destination Folder…") {
-                        model.chooseDestinationFolder()
-                    }
-                    Spacer()
-                    if let destinationURL = model.destinationURL {
-                        Text(destinationURL.lastPathComponent)
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                if model.devices.isEmpty {
-                    Label("No Garmin-like mounted volume found. If your watch uses MTP, expose or choose its music folder manually.", systemImage: "exclamationmark.triangle")
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(model.devices) { device in
-                        HStack(alignment: .top) {
-                            Image(systemName: "applewatch")
-                                .font(.title3)
-                            VStack(alignment: .leading) {
-                                Text(device.name)
-                                    .font(.headline)
-                                Text(device.suggestedMusicFolderURL.path)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .textSelection(.enabled)
-                            }
-                            Spacer()
-                            Button("Use") {
-                                model.useDevice(device)
-                            }
-                        }
-                        .padding(8)
-                        .background(.quaternary.opacity(0.35))
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                    }
-                }
-
-                if let destinationURL = model.destinationURL {
-                    Divider()
-                    Text("Destination: \(destinationURL.path)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                }
+    private var hero: some View {
+        HStack(alignment: .center, spacing: 16) {
+            ZStack {
+                Circle()
+                    .fill(Color.accentColor.opacity(0.14))
+                    .frame(width: 54, height: 54)
+                Image(systemName: "music.note.list")
+                    .font(.system(size: 24, weight: .semibold))
+                    .foregroundStyle(Color.accentColor)
             }
-        }
-    }
 
-    private var librarySection: some View {
-        GroupBox("Music Library") {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Button("Scan Music Folder…") {
-                        model.chooseLibraryFolder()
-                    }
-                    Button("Add Files…") {
-                        model.addFiles()
-                    }
-                    Button("Clear") {
-                        model.clearTracks()
-                    }
-                    Spacer()
-                    Text("\(model.tracks.count) files loaded")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-
-                if let libraryURL = model.libraryURL {
-                    Text("Library: \(libraryURL.path)")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .textSelection(.enabled)
-                } else {
-                    Text("Choose a folder of local MP3/AAC/M4A/M4B/WAV files, or add individual files.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Garmin Music Manager")
+                    .font(.largeTitle.bold())
+                Text("Prepare local music, catch compatibility problems, and sync a clean playlist to your watch.")
+                    .foregroundStyle(.secondary)
             }
-        }
-    }
-
-    private var trackSection: some View {
-        GroupBox("Tracks") {
-            VStack(alignment: .leading, spacing: 8) {
-                if model.tracks.isEmpty {
-                    ContentUnavailableView(
-                        "No Music Loaded",
-                        systemImage: "music.note.list",
-                        description: Text("Scan a folder or add files to start checking Garmin compatibility.")
-                    )
-                    .frame(maxWidth: .infinity, minHeight: 180)
-                } else {
-                    HStack {
-                        Button("Select Ready") {
-                            model.selectReadyTracks()
-                        }
-                        Button("Select All") {
-                            model.selectAllTracks()
-                        }
-                        Button("Deselect All") {
-                            model.deselectAllTracks()
-                        }
-                        Spacer()
-                        Text("\(model.selectedReadyTrackCount) ready selected")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                    }
-
-                    ScrollView {
-                        LazyVStack(spacing: 8) {
-                            ForEach($model.tracks) { $track in
-                                TrackRow(track: $track)
-                            }
-                        }
-                        .padding(.vertical, 4)
-                    }
-                    .frame(minHeight: 240)
-                }
-            }
-        }
-    }
-
-    private var actionBar: some View {
-        HStack {
-            Button {
-                model.syncSelectedTracks()
-            } label: {
-                Label("Sync Selected to Watch Folder", systemImage: "arrow.down.doc")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(!model.canSync)
 
             Spacer()
 
-            Text(model.canSync ? "Ready to copy compatible selected tracks." : "Choose a destination and select compatible tracks to sync.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .trailing, spacing: 8) {
+                StatusPill(text: model.overallReadinessLabel, status: model.overallReadinessStatus)
+                Button {
+                    model.scanDevices()
+                } label: {
+                    Label("Rescan Watches", systemImage: "arrow.clockwise")
+                }
+                .buttonStyle(.bordered)
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 18)
+        .background(.thinMaterial)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(Color(nsColor: .separatorColor).opacity(0.5))
+                .frame(height: 1)
         }
     }
 
-    private var logSection: some View {
-        GroupBox("Status") {
-            ScrollView {
-                Text(model.statusLog.isEmpty ? "Ready." : model.statusLog)
-                    .font(.system(.caption, design: .monospaced))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .textSelection(.enabled)
-            }
-            .frame(maxHeight: 92)
+    private var workflowStrip: some View {
+        HStack(spacing: 12) {
+            ProgressStepPill(
+                title: "Destination",
+                detail: model.destinationURL == nil ? "Choose watch folder" : "Ready",
+                systemImage: "applewatch",
+                isComplete: model.destinationURL != nil,
+                isCurrent: model.destinationURL == nil
+            )
+            ProgressStepPill(
+                title: "Library",
+                detail: model.tracks.isEmpty ? "Scan files" : "\(model.tracks.count) loaded",
+                systemImage: "folder.badge.plus",
+                isComplete: !model.tracks.isEmpty,
+                isCurrent: model.destinationURL != nil && model.tracks.isEmpty
+            )
+            ProgressStepPill(
+                title: "Review",
+                detail: model.tracks.isEmpty ? "Waiting" : model.issueSummary,
+                systemImage: "checklist",
+                isComplete: !model.tracks.isEmpty && model.unsupportedTrackCount == 0,
+                isCurrent: !model.tracks.isEmpty && model.selectedReadyTrackCount == 0
+            )
+            ProgressStepPill(
+                title: "Sync",
+                detail: model.selectedReadyTrackCount == 0 ? "Select tracks" : "\(model.selectedReadyTrackCount) selected",
+                systemImage: "arrow.down.doc.fill",
+                isComplete: model.lastSyncSummary != nil,
+                isCurrent: model.canSync
+            )
         }
     }
 }
 
-struct TrackRow: View {
-    @Binding var track: MusicTrack
+struct DestinationCard: View {
+    @EnvironmentObject private var model: AppViewModel
 
     var body: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Toggle("", isOn: $track.isSelected)
-                .labelsHidden()
-                .disabled(track.status == .unsupported)
+        SectionCard(
+            title: "Watch destination",
+            subtitle: "Pick a detected Garmin volume or manually choose the watch music folder.",
+            systemImage: "applewatch"
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    Button {
+                        model.scanDevices()
+                    } label: {
+                        Label("Rescan", systemImage: "arrow.clockwise")
+                    }
 
-            Image(systemName: track.status.symbolName)
-                .foregroundStyle(track.status.tint)
-                .frame(width: 22)
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text(track.displayTitle)
-                        .font(.headline)
-                    Spacer()
-                    Text(track.fileExtension.uppercased())
-                        .font(.caption.bold())
-                        .padding(.horizontal, 7)
-                        .padding(.vertical, 3)
-                        .background(.quaternary)
-                        .clipShape(Capsule())
+                    Button {
+                        model.chooseDestinationFolder()
+                    } label: {
+                        Label("Choose Folder…", systemImage: "folder")
+                    }
+                    .buttonStyle(.borderedProminent)
                 }
 
-                Text(track.subtitle)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                if !track.issues.isEmpty {
-                    VStack(alignment: .leading, spacing: 2) {
-                        ForEach(track.issues) { issue in
-                            Label(issue.message, systemImage: issue.severity.symbolName)
-                                .font(.caption)
-                                .foregroundStyle(issue.severity.tint)
+                if model.devices.isEmpty {
+                    EmptyStatePanel(
+                        title: "No mounted Garmin volume found",
+                        message: "Most Garmin music watches use MTP on macOS. If the watch is exposed by another MTP app, choose its Music folder manually.",
+                        systemImage: "exclamationmark.triangle"
+                    )
+                } else {
+                    VStack(spacing: 10) {
+                        ForEach(model.devices) { device in
+                            DeviceChoiceRow(
+                                device: device,
+                                isSelected: model.destinationURL == device.suggestedMusicFolderURL
+                            ) {
+                                model.useDevice(device)
+                            }
                         }
                     }
                 }
 
-                Text(track.url.path)
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                if let destinationURL = model.destinationURL {
+                    PathSummary(
+                        title: "Current destination",
+                        path: destinationURL.path,
+                        systemImage: "checkmark.circle.fill",
+                        tint: .green
+                    )
+                }
             }
         }
-        .padding(10)
-        .background(.quaternary.opacity(0.25))
-        .clipShape(RoundedRectangle(cornerRadius: 10))
+    }
+}
+
+struct LibraryCard: View {
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        SectionCard(
+            title: "Music library",
+            subtitle: "Load local files and preview which ones are likely Garmin-friendly before copying.",
+            systemImage: "music.note"
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    Button {
+                        model.chooseLibraryFolder()
+                    } label: {
+                        Label("Scan Folder…", systemImage: "folder.badge.plus")
+                    }
+                    .buttonStyle(.borderedProminent)
+
+                    Button {
+                        model.addFiles()
+                    } label: {
+                        Label("Add Files…", systemImage: "plus")
+                    }
+
+                    Button(role: .destructive) {
+                        model.clearTracks()
+                    } label: {
+                        Label("Clear", systemImage: "trash")
+                    }
+                    .disabled(model.tracks.isEmpty)
+                }
+
+                if let libraryURL = model.libraryURL {
+                    PathSummary(
+                        title: "Current library",
+                        path: libraryURL.path,
+                        systemImage: "folder.fill",
+                        tint: .accentColor
+                    )
+                } else {
+                    EmptyStatePanel(
+                        title: "No library loaded yet",
+                        message: "Scan a folder or add individual MP3, AAC, M4A, M4B, or WAV files.",
+                        systemImage: "tray"
+                    )
+                }
+
+                HStack(spacing: 10) {
+                    StatTile(title: "Loaded", value: "\(model.tracks.count)", systemImage: "music.note.list")
+                    StatTile(title: "Duration", value: model.totalDurationText, systemImage: "clock")
+                    StatTile(title: "Size", value: model.totalFileSizeText, systemImage: "externaldrive")
+                }
+            }
+        }
+    }
+}
+
+struct TracksCard: View {
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        SectionCard(
+            title: "Review tracks",
+            subtitle: "Search, filter, and select only the files you want to copy to the watch.",
+            systemImage: "checklist"
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                toolbar
+                stats
+
+                if model.tracks.isEmpty {
+                    EmptyStatePanel(
+                        title: "Nothing to review",
+                        message: "Load a folder or add files to see compatibility warnings here.",
+                        systemImage: "music.note.list"
+                    )
+                    .frame(minHeight: 170)
+                } else if model.visibleTracks.isEmpty {
+                    EmptyStatePanel(
+                        title: "No tracks match the current filters",
+                        message: "Clear the search field or change the status filter.",
+                        systemImage: "line.3.horizontal.decrease.circle"
+                    )
+                    .frame(minHeight: 170)
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 10) {
+                            ForEach(model.visibleTracks) { track in
+                                TrackRow(
+                                    track: track,
+                                    isSelected: Binding(
+                                        get: { model.isTrackSelected(track.id) },
+                                        set: { model.setTrackSelected(track.id, isSelected: $0) }
+                                    )
+                                )
+                            }
+                        }
+                        .padding(.vertical, 2)
+                    }
+                    .frame(minHeight: 300, maxHeight: 420)
+                }
+            }
+        }
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+            TextField("Search title, artist, album, or filename", text: $model.searchText)
+                .textFieldStyle(.roundedBorder)
+
+            Picker("Status", selection: $model.statusFilter) {
+                ForEach(TrackStatusFilter.allCases) { filter in
+                    Text(filter.title).tag(filter)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(width: 142)
+
+            Picker("Sort", selection: $model.trackSort) {
+                ForEach(TrackSort.allCases) { sort in
+                    Text(sort.title).tag(sort)
+                }
+            }
+            .pickerStyle(.menu)
+            .frame(width: 136)
+        }
+    }
+
+    private var stats: some View {
+        HStack(spacing: 10) {
+            StatChip(title: "Ready", value: "\(model.readyTrackCount)", systemImage: "checkmark.circle.fill", tint: .green)
+            StatChip(title: "Warnings", value: "\(model.warningTrackCount)", systemImage: "exclamationmark.triangle.fill", tint: .orange)
+            StatChip(title: "Unsupported", value: "\(model.unsupportedTrackCount)", systemImage: "xmark.octagon.fill", tint: .red)
+            Spacer()
+            Button("Select Ready") {
+                model.selectReadyTracks()
+            }
+            .disabled(model.readyTrackCount == 0)
+
+            Button("Select Compatible") {
+                model.selectAllTracks()
+            }
+            .disabled(model.tracks.isEmpty)
+
+            Button("Deselect All") {
+                model.deselectAllTracks()
+            }
+            .disabled(model.selectedReadyTrackCount == 0)
+        }
+    }
+}
+
+struct SyncCard: View {
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        SectionCard(
+            title: "Sync preview",
+            subtitle: "Check the selected transfer before files are copied into a generated GarminMusicManager folder.",
+            systemImage: "arrow.down.doc.fill"
+        ) {
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    StatTile(title: "Selected", value: "\(model.selectedReadyTrackCount)", systemImage: "checkmark.circle")
+                    StatTile(title: "Transfer size", value: model.selectedFileSizeText, systemImage: "externaldrive")
+                    StatTile(title: "Duration", value: model.selectedDurationText, systemImage: "clock")
+                }
+
+                if let destinationURL = model.destinationURL {
+                    PathSummary(
+                        title: "Files will copy to",
+                        path: destinationURL.appendingPathComponent("GarminMusicManager", isDirectory: true).path,
+                        systemImage: "arrow.down.circle.fill",
+                        tint: .accentColor
+                    )
+                } else {
+                    PathSummary(
+                        title: "Destination needed",
+                        path: "Choose a watch music folder before syncing.",
+                        systemImage: "exclamationmark.triangle.fill",
+                        tint: .orange
+                    )
+                }
+
+                if let progress = model.syncProgress {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ProgressView(value: progress)
+                        Text("Copying selected tracks…")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                if let lastSyncSummary = model.lastSyncSummary {
+                    Label(lastSyncSummary, systemImage: "checkmark.seal.fill")
+                        .font(.callout.weight(.medium))
+                        .foregroundStyle(.green)
+                }
+
+                HStack {
+                    Text(model.canSync ? "Ready to copy compatible selected tracks." : model.syncHelpText)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    Spacer()
+
+                    Button {
+                        model.syncSelectedTracks()
+                    } label: {
+                        Label("Sync Selected", systemImage: "arrow.down.doc")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.large)
+                    .disabled(!model.canSync)
+                    .keyboardShortcut(.return, modifiers: [.command])
+                }
+            }
+        }
+    }
+}
+
+struct StatusLogCard: View {
+    @EnvironmentObject private var model: AppViewModel
+
+    var body: some View {
+        SectionCard(
+            title: "Activity log",
+            subtitle: "Recent scans, selections, and sync results.",
+            systemImage: "terminal"
+        ) {
+            ScrollView {
+                Text(model.statusLog.isEmpty ? "Ready. Pick a Garmin destination and scan local files." : model.statusLog)
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .textSelection(.enabled)
+            }
+            .frame(maxHeight: 130)
+        }
+    }
+}
+
+struct DeviceChoiceRow: View {
+    let device: GarminDevice
+    let isSelected: Bool
+    let action: () -> Void
+
+    var body: some View {
+        HStack(alignment: .center, spacing: 12) {
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "applewatch")
+                .font(.title3)
+                .foregroundStyle(isSelected ? .green : .accentColor)
+                .frame(width: 26)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(device.name)
+                    .font(.headline)
+                Text(device.suggestedMusicFolderURL.path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+
+            Spacer()
+
+            Button(isSelected ? "Selected" : "Use") {
+                action()
+            }
+            .buttonStyle(isSelected ? .bordered : .borderedProminent)
+            .disabled(isSelected)
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(isSelected ? Color.green.opacity(0.12) : Color(nsColor: .windowBackgroundColor).opacity(0.65))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(isSelected ? Color.green.opacity(0.45) : Color(nsColor: .separatorColor).opacity(0.6), lineWidth: 1)
+        )
+    }
+}
+
+struct TrackRow: View {
+    let track: MusicTrack
+    @Binding var isSelected: Bool
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Toggle("", isOn: $isSelected)
+                .labelsHidden()
+                .disabled(track.status == .unsupported)
+                .accessibilityLabel("Select \(track.displayTitle)")
+
+            StatusBadge(status: track.status)
+                .padding(.top, 1)
+
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(alignment: .firstTextBaseline) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(track.displayTitle)
+                            .font(.headline)
+                            .lineLimit(1)
+                        Text(track.subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
+
+                    Spacer(minLength: 16)
+
+                    Text(track.fileExtension.uppercased())
+                        .font(.caption.bold())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color(nsColor: .controlBackgroundColor), in: Capsule())
+                }
+
+                if !track.issues.isEmpty {
+                    VStack(alignment: .leading, spacing: 5) {
+                        ForEach(track.issues) { issue in
+                            IssuePill(issue: issue)
+                        }
+                    }
+                }
+
+                HStack(spacing: 8) {
+                    Label(track.url.path, systemImage: "doc")
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if let fileSizeBytes = track.fileSizeBytes {
+                        Text("•")
+                        Text(ByteCountFormatter.string(fromByteCount: Int64(fileSizeBytes), countStyle: .file))
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .textSelection(.enabled)
+            }
+        }
+        .padding(12)
+        .background(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .fill(isSelected ? Color.accentColor.opacity(0.10) : Color(nsColor: .windowBackgroundColor).opacity(0.68))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(isSelected ? Color.accentColor.opacity(0.38) : Color(nsColor: .separatorColor).opacity(0.55), lineWidth: 1)
+        )
+    }
+}
+
+struct SectionCard<Content: View>: View {
+    let title: String
+    let subtitle: String
+    let systemImage: String
+    @ViewBuilder let content: Content
+
+    init(title: String, subtitle: String, systemImage: String, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.subtitle = subtitle
+        self.systemImage = systemImage
+        self.content = content()
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: systemImage)
+                    .font(.title3.weight(.semibold))
+                    .foregroundStyle(Color.accentColor)
+                    .frame(width: 28)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.title3.bold())
+                    Text(subtitle)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            content
+        }
+        .padding(18)
+        .background(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.86))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 22, style: .continuous)
+                .stroke(Color(nsColor: .separatorColor).opacity(0.65), lineWidth: 1)
+        )
+        .shadow(color: .black.opacity(0.05), radius: 18, x: 0, y: 8)
+    }
+}
+
+struct EmptyStatePanel: View {
+    let title: String
+    let message: String
+    let systemImage: String
+
+    var body: some View {
+        VStack(alignment: .center, spacing: 8) {
+            Image(systemName: systemImage)
+                .font(.system(size: 28, weight: .semibold))
+                .foregroundStyle(.secondary)
+            Text(title)
+                .font(.headline)
+            Text(message)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(18)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.55), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+    }
+}
+
+struct PathSummary: View {
+    let title: String
+    let path: String
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: systemImage)
+                .foregroundStyle(tint)
+                .frame(width: 20)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.caption.bold())
+                Text(path)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(2)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+            }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(tint.opacity(0.09), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+struct ProgressStepPill: View {
+    let title: String
+    let detail: String
+    let systemImage: String
+    let isComplete: Bool
+    let isCurrent: Bool
+
+    private var tint: Color {
+        if isComplete { return .green }
+        if isCurrent { return .accentColor }
+        return .secondary
+    }
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: isComplete ? "checkmark.circle.fill" : systemImage)
+                .font(.headline)
+                .foregroundStyle(tint)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.callout.weight(.semibold))
+                Text(detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill((isCurrent ? Color.accentColor : tint).opacity(isCurrent ? 0.12 : 0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke((isCurrent ? Color.accentColor : tint).opacity(isCurrent ? 0.35 : 0.18), lineWidth: 1)
+        )
+    }
+}
+
+struct StatTile: View {
+    let title: String
+    let value: String
+    let systemImage: String
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 5) {
+                Image(systemName: systemImage)
+                    .foregroundStyle(.secondary)
+                Text(title)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Text(value)
+                .font(.headline.monospacedDigit())
+                .lineLimit(1)
+                .minimumScaleFactor(0.75)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(12)
+        .background(Color(nsColor: .windowBackgroundColor).opacity(0.58), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+}
+
+struct StatChip: View {
+    let title: String
+    let value: String
+    let systemImage: String
+    let tint: Color
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: systemImage)
+            Text(value)
+                .fontWeight(.bold)
+            Text(title)
+                .foregroundStyle(.secondary)
+        }
+        .font(.caption)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .foregroundStyle(tint)
+        .background(tint.opacity(0.10), in: Capsule())
+    }
+}
+
+struct StatusPill: View {
+    let text: String
+    let status: TrackStatus
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: status.symbolName)
+            Text(text)
+                .fontWeight(.semibold)
+        }
+        .font(.caption)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .foregroundStyle(status.tint)
+        .background(status.tint.opacity(0.12), in: Capsule())
+    }
+}
+
+struct StatusBadge: View {
+    let status: TrackStatus
+
+    var body: some View {
+        HStack(spacing: 6) {
+            Image(systemName: status.symbolName)
+            Text(status.label)
+        }
+        .font(.caption.weight(.semibold))
+        .foregroundStyle(status.tint)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(status.tint.opacity(0.12), in: Capsule())
+    }
+}
+
+struct IssuePill: View {
+    let issue: TrackIssue
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Image(systemName: issue.severity.symbolName)
+            Text(issue.message)
+        }
+        .font(.caption)
+        .foregroundStyle(issue.severity.tint)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 5)
+        .background(issue.severity.tint.opacity(0.10), in: RoundedRectangle(cornerRadius: 8, style: .continuous))
     }
 }
 
@@ -264,13 +791,107 @@ final class AppViewModel: ObservableObject {
     @Published var libraryURL: URL?
     @Published var tracks: [MusicTrack] = []
     @Published var statusLog = ""
+    @Published var searchText = ""
+    @Published var statusFilter: TrackStatusFilter = .all
+    @Published var trackSort: TrackSort = .title
+    @Published var syncProgress: Double?
+    @Published var lastSyncSummary: String?
 
     var selectedReadyTrackCount: Int {
-        tracks.filter { $0.isSelected && $0.status != .unsupported }.count
+        selectedReadyTracks.count
+    }
+
+    var selectedReadyTracks: [MusicTrack] {
+        tracks.filter { $0.isSelected && $0.status != .unsupported }
+    }
+
+    var selectedWarningTrackCount: Int {
+        selectedReadyTracks.filter { $0.status == .warning }.count
+    }
+
+    var readyTrackCount: Int {
+        tracks.filter { $0.status == .ready }.count
+    }
+
+    var warningTrackCount: Int {
+        tracks.filter { $0.status == .warning }.count
+    }
+
+    var unsupportedTrackCount: Int {
+        tracks.filter { $0.status == .unsupported }.count
     }
 
     var canSync: Bool {
-        destinationURL != nil && selectedReadyTrackCount > 0
+        destinationURL != nil && selectedReadyTrackCount > 0 && syncProgress == nil
+    }
+
+    var visibleTracks: [MusicTrack] {
+        let trimmedSearch = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+        return tracks
+            .filter { track in
+                statusFilter.matches(track)
+            }
+            .filter { track in
+                guard !trimmedSearch.isEmpty else { return true }
+                return track.searchableText.contains(trimmedSearch)
+            }
+            .sorted(by: trackSort.areInIncreasingOrder)
+    }
+
+    var totalDurationText: String {
+        DurationFormatter.formatLong(tracks.compactMap { $0.duration }.reduce(0, +))
+    }
+
+    var selectedDurationText: String {
+        DurationFormatter.formatLong(selectedReadyTracks.compactMap { $0.duration }.reduce(0, +))
+    }
+
+    var totalFileSizeText: String {
+        ByteCountFormatter.string(fromByteCount: Int64(totalFileSizeBytes), countStyle: .file)
+    }
+
+    var selectedFileSizeText: String {
+        ByteCountFormatter.string(fromByteCount: Int64(selectedFileSizeBytes), countStyle: .file)
+    }
+
+    var issueSummary: String {
+        if unsupportedTrackCount > 0 {
+            return "\(unsupportedTrackCount) unsupported"
+        }
+        if warningTrackCount > 0 {
+            return "\(warningTrackCount) warning\(warningTrackCount == 1 ? "" : "s")"
+        }
+        return "All ready"
+    }
+
+    var overallReadinessLabel: String {
+        if destinationURL == nil { return "Needs destination" }
+        if tracks.isEmpty { return "Needs music" }
+        if selectedReadyTrackCount == 0 { return "Select tracks" }
+        if selectedWarningTrackCount > 0 { return "Ready with warnings" }
+        return "Ready to sync"
+    }
+
+    var overallReadinessStatus: TrackStatus {
+        if canSync && selectedWarningTrackCount == 0 { return .ready }
+        if destinationURL != nil && !tracks.isEmpty { return .warning }
+        return .unsupported
+    }
+
+    var syncHelpText: String {
+        if destinationURL == nil { return "Choose a destination folder first." }
+        if tracks.isEmpty { return "Scan or add local music files first." }
+        if selectedReadyTrackCount == 0 { return "Select at least one compatible track." }
+        return "Ready."
+    }
+
+    private var totalFileSizeBytes: Int {
+        tracks.compactMap { $0.fileSizeBytes }.reduce(0, +)
+    }
+
+    private var selectedFileSizeBytes: Int {
+        selectedReadyTracks.compactMap { $0.fileSizeBytes }.reduce(0, +)
     }
 
     func scanDevices() {
@@ -280,6 +901,7 @@ final class AppViewModel: ObservableObject {
 
     func useDevice(_ device: GarminDevice) {
         destinationURL = device.suggestedMusicFolderURL
+        lastSyncSummary = nil
         appendLog("Selected destination: \(device.suggestedMusicFolderURL.path)")
     }
 
@@ -293,6 +915,7 @@ final class AppViewModel: ObservableObject {
 
         if panel.runModal() == .OK, let url = panel.url {
             destinationURL = url
+            lastSyncSummary = nil
             appendLog("Selected destination manually: \(url.path)")
         }
     }
@@ -323,6 +946,7 @@ final class AppViewModel: ObservableObject {
         if panel.runModal() == .OK {
             let newTracks = panel.urls.map { MusicInspector.inspect(url: $0) }
             mergeTracks(newTracks)
+            lastSyncSummary = nil
             appendLog("Added \(newTracks.count) file(s).")
         }
     }
@@ -331,33 +955,54 @@ final class AppViewModel: ObservableObject {
         let urls = MusicInspector.findCandidateAudioFiles(in: url)
         let inspected = urls.map { MusicInspector.inspect(url: $0) }
         tracks = inspected.sorted { $0.displayTitle.localizedCaseInsensitiveCompare($1.displayTitle) == .orderedAscending }
+        searchText = ""
+        statusFilter = .all
+        lastSyncSummary = nil
         appendLog("Scanned \(url.path). Loaded \(tracks.count) candidate audio file(s).")
     }
 
     func clearTracks() {
         tracks.removeAll()
+        libraryURL = nil
+        searchText = ""
+        statusFilter = .all
+        lastSyncSummary = nil
         appendLog("Cleared loaded tracks.")
     }
 
     func selectReadyTracks() {
         for index in tracks.indices {
-            tracks[index].isSelected = tracks[index].status != .unsupported
+            tracks[index].isSelected = tracks[index].status == .ready
         }
-        appendLog("Selected all tracks that are not marked unsupported.")
+        lastSyncSummary = nil
+        appendLog("Selected \(readyTrackCount) track(s) with no warnings.")
     }
 
     func selectAllTracks() {
         for index in tracks.indices {
             tracks[index].isSelected = tracks[index].status != .unsupported
         }
-        appendLog("Selected all compatible or warning tracks.")
+        lastSyncSummary = nil
+        appendLog("Selected all compatible tracks, including files with warnings.")
     }
 
     func deselectAllTracks() {
         for index in tracks.indices {
             tracks[index].isSelected = false
         }
+        lastSyncSummary = nil
         appendLog("Deselected all tracks.")
+    }
+
+    func isTrackSelected(_ id: UUID) -> Bool {
+        tracks.first(where: { $0.id == id })?.isSelected ?? false
+    }
+
+    func setTrackSelected(_ id: UUID, isSelected: Bool) {
+        guard let index = tracks.firstIndex(where: { $0.id == id }) else { return }
+        guard tracks[index].status != .unsupported else { return }
+        tracks[index].isSelected = isSelected
+        lastSyncSummary = nil
     }
 
     func syncSelectedTracks() {
@@ -366,11 +1011,14 @@ final class AppViewModel: ObservableObject {
             return
         }
 
-        let selected = tracks.filter { $0.isSelected && $0.status != .unsupported }
+        let selected = selectedReadyTracks
         guard !selected.isEmpty else {
             appendLog("No compatible selected tracks to sync.")
             return
         }
+
+        syncProgress = 0
+        lastSyncSummary = nil
 
         do {
             let folderName = "GarminMusicManager"
@@ -380,7 +1028,7 @@ final class AppViewModel: ObservableObject {
             var playlistLines = ["#EXTM3U"]
             var copiedCount = 0
 
-            for track in selected {
+            for (offset, track) in selected.enumerated() {
                 let cleanName = FileNameSanitizer.safeFileName(for: track)
                 let targetURL = FileNameSanitizer.uniqueURL(in: syncFolder, preferredFileName: cleanName)
 
@@ -390,6 +1038,7 @@ final class AppViewModel: ObservableObject {
 
                 try FileManager.default.copyItem(at: track.url, to: targetURL)
                 copiedCount += 1
+                syncProgress = Double(offset + 1) / Double(selected.count)
 
                 let extInfDuration = track.duration.map { String(Int($0.rounded())) } ?? "-1"
                 playlistLines.append("#EXTINF:\(extInfDuration),\(track.playlistDisplayName)")
@@ -399,11 +1048,15 @@ final class AppViewModel: ObservableObject {
             let playlistURL = syncFolder.appendingPathComponent("GarminMusicManager.m3u8")
             try playlistLines.joined(separator: "\n").write(to: playlistURL, atomically: true, encoding: .utf8)
 
+            let summary = "Copied \(copiedCount) track(s) and wrote GarminMusicManager.m3u8."
+            lastSyncSummary = summary
             appendLog("Copied \(copiedCount) track(s) into \(syncFolder.path)")
             appendLog("Wrote playlist: \(playlistURL.path)")
         } catch {
             appendLog("Sync failed: \(error.localizedDescription)")
         }
+
+        syncProgress = nil
     }
 
     private func mergeTracks(_ newTracks: [MusicTrack]) {
@@ -523,12 +1176,27 @@ struct MusicTrack: Identifiable, Hashable {
         }
         return displayTitle
     }
+
+    var searchableText: String {
+        [displayTitle, artist, album, fileName, fileExtension]
+            .compactMap { $0 }
+            .joined(separator: " ")
+            .lowercased()
+    }
 }
 
 enum TrackStatus: Hashable {
     case ready
     case warning
     case unsupported
+
+    var label: String {
+        switch self {
+        case .ready: return "Ready"
+        case .warning: return "Warning"
+        case .unsupported: return "Unsupported"
+        }
+    }
 
     var symbolName: String {
         switch self {
@@ -543,6 +1211,78 @@ enum TrackStatus: Hashable {
         case .ready: return .green
         case .warning: return .orange
         case .unsupported: return .red
+        }
+    }
+}
+
+enum TrackStatusFilter: String, CaseIterable, Identifiable {
+    case all
+    case ready
+    case warning
+    case unsupported
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .all: return "All statuses"
+        case .ready: return "Ready"
+        case .warning: return "Warnings"
+        case .unsupported: return "Unsupported"
+        }
+    }
+
+    func matches(_ track: MusicTrack) -> Bool {
+        switch self {
+        case .all: return true
+        case .ready: return track.status == .ready
+        case .warning: return track.status == .warning
+        case .unsupported: return track.status == .unsupported
+        }
+    }
+}
+
+enum TrackSort: String, CaseIterable, Identifiable {
+    case title
+    case artist
+    case album
+    case status
+    case size
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .title: return "Title"
+        case .artist: return "Artist"
+        case .album: return "Album"
+        case .status: return "Status"
+        case .size: return "Size"
+        }
+    }
+
+    func areInIncreasingOrder(_ lhs: MusicTrack, _ rhs: MusicTrack) -> Bool {
+        switch self {
+        case .title:
+            return lhs.displayTitle.localizedCaseInsensitiveCompare(rhs.displayTitle) == .orderedAscending
+        case .artist:
+            return (lhs.artist ?? "").localizedCaseInsensitiveCompare(rhs.artist ?? "") == .orderedAscending
+        case .album:
+            return (lhs.album ?? "").localizedCaseInsensitiveCompare(rhs.album ?? "") == .orderedAscending
+        case .status:
+            return lhs.status.sortOrder < rhs.status.sortOrder
+        case .size:
+            return (lhs.fileSizeBytes ?? 0) > (rhs.fileSizeBytes ?? 0)
+        }
+    }
+}
+
+private extension TrackStatus {
+    var sortOrder: Int {
+        switch self {
+        case .ready: return 0
+        case .warning: return 1
+        case .unsupported: return 2
         }
     }
 }
@@ -659,6 +1399,19 @@ enum DurationFormatter {
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    static func formatLong(_ seconds: Double) -> String {
+        let totalSeconds = max(0, Int(seconds.rounded()))
+        guard totalSeconds > 0 else { return "0m" }
+
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+
+        if hours > 0 {
+            return "\(hours)h \(minutes)m"
+        }
+        return "\(max(1, minutes))m"
     }
 }
 
