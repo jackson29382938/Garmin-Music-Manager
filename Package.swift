@@ -15,7 +15,10 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "GarminMusicManager"
+            name: "GarminMusicManager",
+            linkerSettings: [
+                .linkedFramework("iTunesLibrary")
+            ]
         )
     ]
 )
