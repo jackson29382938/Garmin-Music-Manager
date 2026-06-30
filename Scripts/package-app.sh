@@ -9,6 +9,7 @@
 set -euo pipefail
 
 APP_NAME="GarminMusicManager"
+HELPER_NAME="GarminMTPHelper"
 BUNDLE_ID="com.garminmusicmanager.app"
 DISPLAY_NAME="Garmin Music Manager"
 
@@ -30,6 +31,13 @@ RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
 # Derive a version from git (fallback to 0.1.0).
 VERSION="$(git describe --tags --always 2>/dev/null || echo "0.1.0")"
+ICON_SVG="$ROOT_DIR/Resources/AppIcon.svg"
+ICON_ICNS="$ROOT_DIR/Resources/AppIcon.icns"
+
+if [[ -f "$ICON_SVG" ]]; then
+    echo "==> Generating app icon"
+  bash "$SCRIPT_DIR/generate-icon.sh"
+fi
 
 echo "==> Building $APP_NAME ($CONFIG)"
 swift build -c "$CONFIG"
@@ -40,12 +48,24 @@ if [[ ! -f "$BINARY_PATH" ]]; then
     exit 1
 fi
 
+HELPER_PATH="$(swift build -c "$CONFIG" --show-bin-path)/$HELPER_NAME"
+if [[ ! -f "$HELPER_PATH" ]]; then
+    echo "error: built helper not found at $HELPER_PATH" >&2
+    exit 1
+fi
+
 echo "==> Assembling app bundle at $APP_DIR"
 rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR" "$RESOURCES_DIR"
 
 cp "$BINARY_PATH" "$MACOS_DIR/$APP_NAME"
 chmod +x "$MACOS_DIR/$APP_NAME"
+cp "$HELPER_PATH" "$MACOS_DIR/$HELPER_NAME"
+chmod +x "$MACOS_DIR/$HELPER_NAME"
+
+if [[ -f "$ICON_ICNS" ]]; then
+    cp "$ICON_ICNS" "$RESOURCES_DIR/AppIcon.icns"
+fi
 
 cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
@@ -72,6 +92,8 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
     <true/>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.music</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
     <key>NSAppleMusicUsageDescription</key>
     <string>Garmin Music Manager reads your Apple Music library to let you browse playlists and albums and copy local tracks to your watch.</string>
 </dict>

@@ -1,3 +1,4 @@
+import GarminMusicCore
 import SwiftUI
 
 struct SettingsView: View {
@@ -28,6 +29,30 @@ struct SettingsView: View {
                 TextField("Default playlist name", text: $model.playlistName)
             }
 
+            Section("Garmin Browser") {
+                Toggle("Enable advanced full-storage explorer", isOn: $model.advancedStorageExplorerEnabled)
+
+                Picker("Destructive confirmation", selection: $model.destructiveConfirmationMode) {
+                    ForEach(DestructiveConfirmationMode.allCases) { mode in
+                        Text(label(for: mode)).tag(mode)
+                    }
+                }
+
+                if !model.advancedStorageExplorerEnabled {
+                    Text("The Garmin browser stays music-focused by default. Full storage is hidden until this setting is enabled.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            Section("MTP Backend") {
+                Label(model.mtpDependencyStatus.message, systemImage: model.mtpDependencyStatus.isReady ? "checkmark.circle" : "exclamationmark.triangle")
+                    .foregroundStyle(model.mtpDependencyStatus.isReady ? .green : .orange)
+                Text("The app uses the bundled Garmin helper for MTP browsing and file operations. Homebrew/libmtp is only installed when you choose Install MTP Support.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
             Section {
                 Button("Save Settings") {
                     model.saveSettings()
@@ -35,13 +60,24 @@ struct SettingsView: View {
             }
 
             Section("About") {
-                Text("Garmin Music Manager copies local audio to a mounted Garmin music folder. Watches that only expose MTP storage must be mounted or exposed by another tool first.")
+                Text("Garmin Music Manager copies local audio to mounted Garmin folders and helper-backed Garmin MTP devices. Streaming-provider files may stay hidden or protected on the watch.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420)
+        .frame(width: 480)
         .padding()
+    }
+
+    private func label(for mode: DestructiveConfirmationMode) -> String {
+        switch mode {
+        case .always:
+            return "Always"
+        case .batchesOnly:
+            return "Batches only"
+        case .never:
+            return "Never"
+        }
     }
 }

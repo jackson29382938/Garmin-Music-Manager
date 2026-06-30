@@ -16,17 +16,38 @@ struct TrackTableView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("Tracks")
-                    .font(.headline)
+                Label {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Mac Library")
+                            .font(.headline)
+                        Text(model.macLibraryLocationDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
+                } icon: {
+                    Image(systemName: "laptopcomputer")
+                }
+
                 Text("\(model.syncableTracks.count) selected / \(model.tracks.count) total")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+
                 if !model.blockedTracks.isEmpty {
                     Text("\(model.blockedTracks.count) blocked")
                         .font(.caption.bold())
                         .foregroundStyle(.red)
                 }
                 Spacer()
+
+                Button {
+                    model.uploadSelectedTracksToDevice()
+                } label: {
+                    Label("Send to Garmin", systemImage: "arrow.down.to.line.compact")
+                }
+                .disabled(!model.canUploadSelectedTracksToDevice)
+                .help("Send selected compatible Mac tracks to the Garmin library")
             }
             .padding(.horizontal)
             .padding(.top, 10)
@@ -37,6 +58,10 @@ struct TrackTableView: View {
                 List {
                     ForEach(displayedTrackIndices, id: \.self) { index in
                         TrackRowView(track: $model.tracks[index])
+                            .onDrag {
+                                trackDragProvider(for: model.tracks[index])
+                            }
+                            .help("Drag to Garmin Library")
                     }
                     .onDelete { offsets in
                         model.removeTracks(at: offsets)
@@ -54,9 +79,9 @@ struct TrackTableView: View {
             Image(systemName: "music.note.list")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
-            Text("Add music files")
+            Text("Mac Library is empty")
                 .font(.title3.bold())
-            Text("Drag and drop MP3/AAC/M4A/WAV files here, or use Add Files / Add Folder.")
+            Text("Drop Mac audio files here, or use Add Files / Add Folder.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
@@ -75,12 +100,17 @@ struct TrackTableView: View {
 
     private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
         var urls: [URL] = []
+        let lock = NSLock()
         let group = DispatchGroup()
 
         for provider in providers {
             group.enter()
             _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                if let url { urls.append(url) }
+                if let url {
+                    lock.lock()
+                    urls.append(url)
+                    lock.unlock()
+                }
                 group.leave()
             }
         }
@@ -89,6 +119,11 @@ struct TrackTableView: View {
             model.handleDroppedURLs(urls)
         }
         return true
+    }
+
+    private func trackDragProvider(for track: AudioTrack) -> NSItemProvider {
+        NSItemProvider(contentsOf: track.url)
+            ?? NSItemProvider(object: track.url.absoluteString as NSString)
     }
 }
 

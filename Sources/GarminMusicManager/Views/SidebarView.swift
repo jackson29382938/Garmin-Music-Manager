@@ -1,3 +1,4 @@
+import GarminMusicCore
 import SwiftUI
 
 struct SidebarView: View {
@@ -5,8 +6,11 @@ struct SidebarView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("Garmin Music Manager")
-                .font(.title2.bold())
+            HStack(spacing: 10) {
+                AppLogoMark(size: 30)
+                Text("Garmin Music Manager")
+                    .font(.title2.bold())
+            }
 
             VStack(alignment: .leading, spacing: 8) {
                 HStack {
@@ -33,7 +37,7 @@ struct SidebarView: View {
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(device.displayName)
                                         .font(.caption.bold())
-                                    if model.isMTPLibraryLoaded {
+                                    if model.isMTPLibraryLoaded || !model.deviceBrowser.files.isEmpty {
                                         Label("Music library loaded", systemImage: "music.note.list")
                                             .font(.caption2)
                                             .foregroundStyle(.green)
@@ -52,14 +56,14 @@ struct SidebarView: View {
                                     model.browseGarminMusicLibrary()
                                 } label: {
                                     HStack(spacing: 6) {
-                                        if model.isBrowsingDevice {
+                                        if model.deviceBrowser.isRefreshing {
                                             ProgressView()
                                                 .controlSize(.small)
                                         }
-                                        Text(model.isBrowsingDevice ? "Loading Garmin Library…" : "Show Garmin Music Library")
+                                        Text(model.deviceBrowser.isRefreshing ? "Loading Garmin Library..." : "Show Garmin Music Library")
                                     }
                                 }
-                                .disabled(model.isBrowsingDevice)
+                                .disabled(model.deviceBrowser.isRefreshing)
                             } else {
                                 Text(model.mtpDependencyStatus.message)
                                     .font(.caption2)
@@ -119,14 +123,14 @@ struct SidebarView: View {
                 }
             }
 
-            if let storage = model.storageInfo {
+            if let storage = model.deviceBrowser.storageInfo {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Storage")
                         .font(.headline)
-                    Text("\(storage.availableDescription) free of \(storage.totalDescription)")
+                    Text("\(availableDescription(for: storage)) free of \(totalDescription(for: storage))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    Text("\(storage.audioFileCount) audio files (\(storage.audioSizeDescription))")
+                    Text("\(storage.fileCount) files (\(ByteCountFormatter.string(fromByteCount: storage.usedByFiles, countStyle: .file)))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                     if model.exceedsAvailableStorage {
@@ -148,5 +152,15 @@ struct SidebarView: View {
             .foregroundStyle(.secondary)
         }
         .padding()
+    }
+
+    private func availableDescription(for storage: DeviceStorageInfo) -> String {
+        guard let available = storage.availableCapacity else { return "Unknown" }
+        return ByteCountFormatter.string(fromByteCount: available, countStyle: .file)
+    }
+
+    private func totalDescription(for storage: DeviceStorageInfo) -> String {
+        guard let total = storage.totalCapacity else { return "Unknown" }
+        return ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
     }
 }

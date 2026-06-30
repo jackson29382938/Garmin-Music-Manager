@@ -9,7 +9,7 @@ struct GarminMusicManagerApp: App {
         WindowGroup {
             ContentView()
                 .environmentObject(appModel)
-                .frame(minWidth: 560, idealWidth: 1000, minHeight: 460, idealHeight: 680)
+                .frame(minWidth: 860, idealWidth: 1180, minHeight: 600, idealHeight: 780)
         }
         .commands {
             CommandGroup(after: .newItem) {

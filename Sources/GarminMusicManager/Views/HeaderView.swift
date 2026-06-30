@@ -6,7 +6,7 @@ struct HeaderView: View {
     var body: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Text("Playlist")
+                Text("Sync Playlist")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 TextField("Playlist name", text: $model.playlistName)

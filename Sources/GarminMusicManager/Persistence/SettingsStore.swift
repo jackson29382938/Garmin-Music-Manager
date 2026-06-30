@@ -1,4 +1,5 @@
 import Foundation
+import GarminMusicCore
 
 final class SettingsStore {
     private let defaults: UserDefaults
@@ -9,6 +10,9 @@ final class SettingsStore {
         static let overwritePolicy = "overwritePolicy"
         static let organizationPolicy = "organizationPolicy"
         static let writePlaylist = "writePlaylist"
+        static let advancedStorageExplorerEnabled = "advancedStorageExplorerEnabled"
+        static let destructiveConfirmationMode = "destructiveConfirmationMode"
+        static let lastDeviceBrowseMode = "lastDeviceBrowseMode"
     }
 
     init(defaults: UserDefaults = .standard) {
@@ -42,6 +46,29 @@ final class SettingsStore {
             defaults.set(newValue.overwritePolicy.rawValue, forKey: Keys.overwritePolicy)
             defaults.set(newValue.organizationPolicy.rawValue, forKey: Keys.organizationPolicy)
             defaults.set(newValue.writePlaylist, forKey: Keys.writePlaylist)
+        }
+    }
+
+    var advancedStorageExplorerEnabled: Bool {
+        get { defaults.object(forKey: Keys.advancedStorageExplorerEnabled) as? Bool ?? false }
+        set { defaults.set(newValue, forKey: Keys.advancedStorageExplorerEnabled) }
+    }
+
+    var destructiveConfirmationMode: DestructiveConfirmationMode {
+        get {
+            DestructiveConfirmationMode(rawValue: defaults.string(forKey: Keys.destructiveConfirmationMode) ?? "") ?? .batchesOnly
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.destructiveConfirmationMode)
+        }
+    }
+
+    var lastDeviceBrowseMode: DeviceBrowseMode {
+        get {
+            DeviceBrowseMode(rawValue: defaults.string(forKey: Keys.lastDeviceBrowseMode) ?? "") ?? .musicOnly
+        }
+        set {
+            defaults.set(newValue.rawValue, forKey: Keys.lastDeviceBrowseMode)
         }
     }
 

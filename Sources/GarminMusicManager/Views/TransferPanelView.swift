@@ -7,7 +7,7 @@ struct TransferPanelView: View {
         VStack(spacing: 10) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("Transfer")
+                    Text("Playlist Sync")
                         .font(.headline)
                     Text(model.transferTargetDescription)
                         .font(.caption)
@@ -38,7 +38,7 @@ struct TransferPanelView: View {
                 Button {
                     model.prepareSyncPreview()
                 } label: {
-                    Label(model.isSyncing ? "Syncing…" : (model.hasMTPDestination ? "Sync to Garmin MTP" : "Sync to Watch Folder"), systemImage: "arrow.down.doc")
+                    Label(model.isSyncing ? "Syncing..." : (model.hasMTPDestination ? "Sync Playlist to Garmin" : "Sync Playlist to Folder"), systemImage: "arrow.down.doc")
                 }
                 .buttonStyle(.borderedProminent)
                 .fixedSize()
