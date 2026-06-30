@@ -3,6 +3,8 @@ import SwiftUI
 struct DeviceContentsView: View {
     @EnvironmentObject private var model: AppModel
     @State private var selectedCollectionID = "all"
+    @State private var fileSearchText = ""
+    @State private var sortOrder = DeviceFileSort.nameAscending
 
     private let allCollectionID = "all"
 
@@ -11,11 +13,47 @@ struct DeviceContentsView: View {
         return model.devicePlaylists.first { $0.id == selectedCollectionID }
     }
 
-    private var visibleFiles: [DeviceAudioFile] {
+    private var collectionFilteredFiles: [DeviceAudioFile] {
         guard let selectedPlaylist else { return model.deviceFiles }
         let names = Set(selectedPlaylist.trackFileNames.map { $0.lowercased() })
-        let matches = model.deviceFiles.filter { names.contains($0.fileName.lowercased()) }
-        return matches
+        return model.deviceFiles.filter { names.contains($0.fileName.lowercased()) }
+    }
+
+    private var displayedFiles: [DeviceAudioFile] {
+        var files = collectionFilteredFiles
+        if !fileSearchText.isEmpty {
+            let query = fileSearchText.lowercased()
+            files = files.filter {
+                $0.fileName.lowercased().contains(query)
+                    || ($0.folderName?.lowercased().contains(query) ?? false)
+            }
+        }
+
+        switch sortOrder {
+        case .nameAscending:
+            return files.sorted { $0.fileName.localizedCaseInsensitiveCompare($1.fileName) == .orderedAscending }
+        case .nameDescending:
+            return files.sorted { $0.fileName.localizedCaseInsensitiveCompare($1.fileName) == .orderedDescending }
+        case .sizeAscending:
+            return files.sorted { $0.byteCount < $1.byteCount }
+        case .sizeDescending:
+            return files.sorted { $0.byteCount > $1.byteCount }
+        case .folderAscending:
+            return files.sorted {
+                let lhs = $0.folderName ?? ""
+                let rhs = $1.folderName ?? ""
+                if lhs.caseInsensitiveCompare(rhs) == .orderedSame {
+                    return $0.fileName.localizedCaseInsensitiveCompare($1.fileName) == .orderedAscending
+                }
+                return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+            }
+        }
+    }
+
+    private var filteredPlaylists: [DevicePlaylist] {
+        guard !fileSearchText.isEmpty else { return model.devicePlaylists }
+        let query = fileSearchText.lowercased()
+        return model.devicePlaylists.filter { $0.name.lowercased().contains(query) }
     }
 
     var body: some View {
@@ -41,7 +79,7 @@ struct DeviceContentsView: View {
                         model.refreshDeviceContents()
                     }
                 }
-                .disabled(model.isBrowsingDevice)
+                .disabled(model.isBrowsingDevice || model.isManagingDeviceFiles)
                 .fixedSize()
             }
             .padding(.horizontal)
@@ -86,11 +124,6 @@ struct DeviceContentsView: View {
                 selectedCollectionID = allCollectionID
             }
         }
-        .onAppear {
-            if model.activeDestination == nil, model.canAttemptMTP, !model.isMTPLibraryLoaded {
-                model.browseGarminMusicLibrary()
-            }
-        }
     }
 
     private var collectionList: some View {
@@ -104,22 +137,29 @@ struct DeviceContentsView: View {
                 Label("All Music", systemImage: "music.note.list")
                     .tag(allCollectionID)
 
-                ForEach(model.devicePlaylists) { playlist in
-                    VStack(alignment: .leading, spacing: 2) {
-                        Label(playlist.name, systemImage: playlist.source == .mtpPlaylist ? "list.bullet.rectangle" : "folder")
-                            .lineLimit(1)
-                        Text("\(playlist.trackCount) track(s) • \(sourceDescription(for: playlist.source))")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(1)
+                if !filteredPlaylists.isEmpty {
+                    Section("Playlists") {
+                        ForEach(filteredPlaylists) { playlist in
+                            collectionRow(playlist)
+                                .tag(playlist.id)
+                        }
                     }
-                    .tag(playlist.id)
                 }
             }
             .listStyle(.sidebar)
         }
-        .frame(width: model.devicePlaylists.isEmpty ? 0 : 230)
-        .clipped()
+        .frame(width: 240)
+    }
+
+    private func collectionRow(_ playlist: DevicePlaylist) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Label(playlist.name, systemImage: playlist.source == .mtpPlaylist ? "list.bullet.rectangle" : "folder")
+                .lineLimit(1)
+            Text("\(playlist.trackCount) track(s) • \(sourceDescription(for: playlist.source))")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .lineLimit(1)
+        }
     }
 
     private var fileList: some View {
@@ -129,7 +169,7 @@ struct DeviceContentsView: View {
                     Text(selectedPlaylist?.name ?? "All Music")
                         .font(.subheadline.bold())
                         .lineLimit(1)
-                    Text("\(visibleFiles.count) visible • \(model.selectedDeviceFileIDs.count) selected")
+                    Text("\(displayedFiles.count) visible • \(model.selectedDeviceFileIDs.count) selected")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -163,6 +203,20 @@ struct DeviceContentsView: View {
             .padding(.horizontal, 8)
 
             HStack(spacing: 8) {
+                TextField("Filter songs", text: $fileSearchText)
+                    .textFieldStyle(.roundedBorder)
+
+                Picker("Sort", selection: $sortOrder) {
+                    ForEach(DeviceFileSort.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
+                }
+                .pickerStyle(.menu)
+                .frame(width: 150)
+            }
+            .padding(.horizontal, 8)
+
+            HStack(spacing: 8) {
                 Text("Name")
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Text("Location")
@@ -174,7 +228,7 @@ struct DeviceContentsView: View {
             .foregroundStyle(.secondary)
             .padding(.horizontal, 12)
 
-            List(visibleFiles, selection: $model.selectedDeviceFileIDs) { file in
+            List(displayedFiles, selection: $model.selectedDeviceFileIDs) { file in
                 HStack(spacing: 8) {
                     Label(file.fileName, systemImage: "music.note")
                         .lineLimit(1)
@@ -218,28 +272,8 @@ struct DeviceContentsView: View {
                 }
             }
 
-            if let selectedPlaylist, visibleFiles.isEmpty, !selectedPlaylist.trackFileNames.isEmpty {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Reported tracks")
-                        .font(.caption.bold())
-                        .foregroundStyle(.secondary)
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 3) {
-                            ForEach(selectedPlaylist.trackFileNames, id: \.self) { trackName in
-                                Text(trackName)
-                                    .font(.caption)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        }
-                    }
-                    .frame(maxHeight: 90)
-                }
-                .padding(.horizontal, 8)
-                .padding(.bottom, 4)
-            } else if let selectedPlaylist, visibleFiles.count < selectedPlaylist.trackFileNames.count {
-                Text("\(selectedPlaylist.trackFileNames.count) track(s) reported by this collection; \(visibleFiles.count) can be matched to browsable files.")
+            if let selectedPlaylist, displayedFiles.isEmpty, !selectedPlaylist.trackFileNames.isEmpty {
+                Text("This playlist lists \(selectedPlaylist.trackCount) track(s), but none matched the current Garmin file index. Try Refresh.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .padding(.horizontal, 8)
@@ -253,7 +287,7 @@ struct DeviceContentsView: View {
         case .m3u8:
             return "M3U8"
         case .folder:
-            return "folder"
+            return "album/folder"
         case .mtpPlaylist:
             return "playlist"
         }

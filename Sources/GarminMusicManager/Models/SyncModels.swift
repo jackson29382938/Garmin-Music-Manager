@@ -66,6 +66,7 @@ struct DeviceAudioFile: Identifiable, Hashable {
     let modifiedDate: Date?
     var folderName: String? = nil
     var mtpFileID: String? = nil
+    var mtpTrackID: String? = nil
 
     var sizeDescription: String {
         ByteCountFormatter.string(fromByteCount: byteCount, countStyle: .file)
@@ -85,6 +86,16 @@ struct DevicePlaylist: Identifiable, Hashable {
     }
 
     var trackCount: Int { trackFileNames.count }
+}
+
+enum DeviceFileSort: String, CaseIterable, Identifiable {
+    case nameAscending = "Name A–Z"
+    case nameDescending = "Name Z–A"
+    case sizeAscending = "Size (smallest)"
+    case sizeDescending = "Size (largest)"
+    case folderAscending = "Folder A–Z"
+
+    var id: String { rawValue }
 }
 
 struct StorageInfo {

@@ -23,6 +23,21 @@ struct MTPDeviceContents {
     let playlists: [DevicePlaylist]
     let deviceName: String?
     let diagnosticMessage: String?
+    let fileIDByName: [String: String]
+
+    init(
+        files: [DeviceAudioFile],
+        playlists: [DevicePlaylist],
+        deviceName: String?,
+        diagnosticMessage: String?,
+        fileIDByName: [String: String] = [:]
+    ) {
+        self.files = files
+        self.playlists = playlists
+        self.deviceName = deviceName
+        self.diagnosticMessage = diagnosticMessage
+        self.fileIDByName = fileIDByName
+    }
 
     var totalBytes: Int64 {
         files.reduce(0) { $0 + $1.byteCount }
@@ -40,6 +55,7 @@ struct MTPDeviceContents {
 
 final class MTPCommandService {
     private let fileManager = FileManager.default
+    private let accessQueue = DispatchQueue(label: "com.garminmusicmanager.mtp-access", qos: .userInitiated)
 
     private static let mtpEnvironment = """
     export LANG=en_US.UTF-8
@@ -96,7 +112,7 @@ final class MTPCommandService {
         settings: SyncSettings,
         progress: @escaping @Sendable (Double, String?) -> Void
     ) async throws -> SyncResult {
-        try await Task.detached(priority: .userInitiated) {
+        try await performExclusive {
             let status = self.dependencyStatus()
             guard status.mtpSendFileURL != nil || status.mtpSendTrackURL != nil else {
                 throw MTPError.dependenciesMissing(status.message)
@@ -190,90 +206,95 @@ final class MTPCommandService {
                 playlistURL: targetFolder.appendingPathComponent("\(cleanPlaylistName).m3u8"),
                 targetFolder: URL(fileURLWithPath: "Garmin MTP / Music / \(cleanPlaylistName)")
             )
-        }.value
+        }
     }
 
     func listDeviceMusicFiles(
         progress: @escaping @Sendable (String) -> Void = { _ in }
     ) async throws -> MTPDeviceContents {
-        try await Task.detached(priority: .userInitiated) {
-            progress("Reading Garmin track index over MTP…")
-            if let trackContents = try? self.listDeviceTracks(progress: progress, deviceName: nil),
-               !trackContents.files.isEmpty || !trackContents.playlists.isEmpty {
-                return trackContents
-            }
+        try await performExclusive {
+            progress("Reading Garmin library over MTP…")
 
-            guard let mtpFilesURL = self.executableURL(named: "mtp-files") else {
-                let status = self.dependencyStatus()
-                throw MTPError.dependenciesMissing(status.isReady
-                    ? "mtp-files is not available. Reinstall MTP support."
-                    : status.message)
-            }
-
-            progress("Reading music library from Garmin over MTP…")
-            let command = "\(self.shellQuoted(mtpFilesURL.path)) 2>&1"
-
-            do {
-                let output = try self.runShellCapturing(command, timeout: 120)
-                try Self.validateMTPOutput(output)
-                let contents = try self.buildDeviceContents(from: output)
-                if !contents.files.isEmpty {
-                    return contents
-                }
-
-                if let trackContents = try? self.listDeviceTracks(progress: progress, deviceName: contents.deviceName),
-                   !trackContents.files.isEmpty {
-                    return trackContents
-                }
-
+            if let contents = try? self.readLibraryInSingleSession(progress: progress),
+               !contents.files.isEmpty {
                 return contents
-            } catch {
-                if let trackContents = try? self.listDeviceTracks(progress: progress, deviceName: nil),
-                   !trackContents.files.isEmpty {
-                    return trackContents
-                }
-                throw error
             }
-        }.value
+
+            if let contents = try? self.readTrackLibraryInSingleSession(progress: progress),
+               !contents.files.isEmpty {
+                return contents
+            }
+
+            if let contents = try? self.readTrackLibraryInSingleSession(progress: progress) {
+                return contents
+            }
+
+            if let contents = try? self.readLibraryInSingleSession(progress: progress) {
+                return contents
+            }
+
+            throw MTPError.commandFailed("Could not read music from the Garmin. Wake/unlock the watch, use a data USB cable, and try Refresh.")
+        }
     }
 
     func downloadFiles(
         _ files: [DeviceAudioFile],
         to destinationFolder: URL,
+        fileIDIndex: [String: String] = [:],
         progress: @escaping @Sendable (String) -> Void
     ) async throws -> Int {
-        try await Task.detached(priority: .userInitiated) {
+        try await performExclusive {
             guard let mtpGetFileURL = self.executableURL(named: "mtp-getfile") else {
                 throw MTPError.dependenciesMissing("mtp-getfile is not available. Reinstall MTP support.")
+            }
+
+            var fileIDIndex = fileIDIndex
+            if files.contains(where: { $0.mtpFileID == nil }) {
+                fileIDIndex = try self.refreshFileIDIndex(merging: fileIDIndex)
             }
 
             var copied = 0
             for file in files {
                 try Task.checkCancellation()
-                guard let mtpFileID = file.mtpFileID else { continue }
+                guard let objectID = self.resolveDownloadObjectID(for: file, fileIDIndex: fileIDIndex) else {
+                    throw MTPError.commandFailed("Could not resolve a Garmin object ID for \(file.fileName). Refresh the library and try again.")
+                }
+
                 let localURL = FileNameSanitizer.uniqueURL(
                     in: destinationFolder,
                     preferredFileName: FileNameSanitizer.sanitizeFileName(file.fileName, fallback: "Garmin Track")
                 )
                 progress("Copying \(file.fileName) from Garmin…")
+
                 try self.runMTPTransferWithRetry {
                     let command = """
                     \(Self.mtpEnvironment)
-                    \(self.shellQuoted(mtpGetFileURL.path)) \(self.shellQuoted(mtpFileID)) \(self.shellQuoted(localURL.path)) 2>&1
+                    \(self.shellQuoted(mtpGetFileURL.path)) \(self.shellQuoted(objectID)) \(self.shellQuoted(localURL.path)) 2>&1
                     """
                     try self.runShell(command, timeout: 600, surfaceOutput: false) { _ in }
                 }
+
+                guard self.fileManager.fileExists(atPath: localURL.path) else {
+                    throw MTPError.commandFailed("Copy finished but \(localURL.lastPathComponent) was not created on disk.")
+                }
+
+                let byteCount = (try? localURL.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) ?? 0
+                guard byteCount > 0 else {
+                    try? self.fileManager.removeItem(at: localURL)
+                    throw MTPError.commandFailed("Copy of \(file.fileName) produced an empty file. The watch may be busy — wait a moment and try again.")
+                }
+
                 copied += 1
             }
             return copied
-        }.value
+        }
     }
 
     func deleteFiles(
         _ files: [DeviceAudioFile],
         progress: @escaping @Sendable (String) -> Void
     ) async throws -> Int {
-        try await Task.detached(priority: .userInitiated) {
+        try await performExclusive {
             guard let mtpDeleteFileURL = self.executableURL(named: "mtp-delfile") else {
                 throw MTPError.dependenciesMissing("mtp-delfile is not available. Reinstall MTP support.")
             }
@@ -281,19 +302,19 @@ final class MTPCommandService {
             var deleted = 0
             for file in files {
                 try Task.checkCancellation()
-                guard let mtpFileID = file.mtpFileID else { continue }
+                guard let objectID = file.mtpFileID ?? file.mtpTrackID else { continue }
                 progress("Deleting \(file.fileName) from Garmin…")
                 try self.runMTPTransferWithRetry {
                     let command = """
                     \(Self.mtpEnvironment)
-                    \(self.shellQuoted(mtpDeleteFileURL.path)) -n \(self.shellQuoted(mtpFileID)) 2>&1
+                    \(self.shellQuoted(mtpDeleteFileURL.path)) -n \(self.shellQuoted(objectID)) 2>&1
                     """
                     try self.runShell(command, timeout: 120, surfaceOutput: false) { _ in }
                 }
                 deleted += 1
             }
             return deleted
-        }.value
+        }
     }
 
     func buildPreview(tracks: [AudioTrack], playlistName: String, settings: SyncSettings) -> SyncPreview {
@@ -370,8 +391,119 @@ final class MTPCommandService {
         var trackReferences: [(trackID: String, displayName: String)]
     }
 
-    private func buildDeviceContents(from output: String) throws -> MTPDeviceContents {
+    private func performExclusive<T: Sendable>(
+        _ operation: @Sendable @escaping () throws -> T
+    ) async throws -> T {
+        try await withCheckedThrowingContinuation { continuation in
+            accessQueue.async {
+                do {
+                    continuation.resume(returning: try operation())
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    private func readLibraryInSingleSession(
+        progress: @escaping @Sendable (String) -> Void
+    ) throws -> MTPDeviceContents {
+        guard let mtpConnectURL = executableURL(named: "mtp-connect"),
+              let mtpFilesURL = executableURL(named: "mtp-files") else {
+            throw MTPError.dependenciesMissing("mtp-files is not available.")
+        }
+
+        let commands: [String] = {
+            var items = [shellQuoted(mtpFilesURL.path)]
+            if let playlistsURL = executableURL(named: "mtp-playlists") {
+                items.append(shellQuoted(playlistsURL.path))
+            }
+            return items
+        }()
+
+        let output = try runConnectedCommands(connectURL: mtpConnectURL, commands: commands, timeout: 180)
+        try Self.validateMTPOutput(output, allowNoPlaylists: true)
+
         let entries = parseMTPFilesystem(output)
+        let audioFiles = buildAudioFiles(from: entries)
+        let fileIDByName = fileIDIndex(for: audioFiles)
+        let playlists = buildSmartPlaylists(
+            mtpPlaylists: (try? listDevicePlaylists(from: output, knownFiles: audioFiles)) ?? [],
+            audioFiles: audioFiles
+        )
+
+        return MTPDeviceContents(
+            files: audioFiles,
+            playlists: playlists,
+            deviceName: parseMTPDeviceName(output),
+            diagnosticMessage: diagnosticMessage(
+                fileCount: audioFiles.count,
+                playlistCount: playlists.count,
+                rawObjectCount: entries.count
+            ),
+            fileIDByName: fileIDByName
+        )
+    }
+
+    private func readTrackLibraryInSingleSession(
+        progress: @escaping @Sendable (String) -> Void
+    ) throws -> MTPDeviceContents {
+        guard let mtpConnectURL = executableURL(named: "mtp-connect"),
+              let mtpTracksURL = executableURL(named: "mtp-tracks") else {
+            throw MTPError.dependenciesMissing("mtp-tracks is not available.")
+        }
+
+        progress("Reading Garmin track index over MTP…")
+        var commands = [shellQuoted(mtpTracksURL.path)]
+        if let playlistsURL = executableURL(named: "mtp-playlists") {
+            commands.append(shellQuoted(playlistsURL.path))
+        }
+
+        let output = try runConnectedCommands(connectURL: mtpConnectURL, commands: commands, timeout: 180)
+        try Self.validateMTPOutput(output, allowNoPlaylists: true)
+
+        let trackEntries = parseMTPTracks(output)
+        var files = trackEntries.map { track in
+            DeviceAudioFile(
+                id: "mtp-track:\(track.trackID)",
+                url: URL(string: "mtp://track/\(track.trackID)") ?? URL(fileURLWithPath: track.displayFileName),
+                fileName: track.displayFileName,
+                byteCount: track.fileSize,
+                modifiedDate: nil,
+                folderName: track.album?.nilIfEmpty,
+                mtpFileID: nil,
+                mtpTrackID: track.trackID
+            )
+        }
+        files.sort { $0.fileName.localizedCaseInsensitiveCompare($1.fileName) == .orderedAscending }
+
+        let playlists = buildSmartPlaylists(
+            mtpPlaylists: (try? listDevicePlaylists(from: output, knownFiles: files)) ?? [],
+            audioFiles: files
+        )
+
+        return MTPDeviceContents(
+            files: files,
+            playlists: playlists,
+            deviceName: parseMTPDeviceName(output),
+            diagnosticMessage: diagnosticMessage(
+                fileCount: files.count,
+                playlistCount: playlists.count,
+                rawObjectCount: trackEntries.count
+            ),
+            fileIDByName: fileIDIndex(for: files)
+        )
+    }
+
+    private func runConnectedCommands(connectURL: URL, commands: [String], timeout: TimeInterval) throws -> String {
+        let commandLine = """
+        \(Self.mtpEnvironment)
+        \(shellQuoted(connectURL.path)) \(commands.joined(separator: " ")) 2>&1
+        """
+        return try runShellCapturing(commandLine, timeout: timeout)
+    }
+
+    private func buildAudioFiles(from entries: [MTPRawEntry]) -> [DeviceAudioFile] {
         let foldersByID = Dictionary(uniqueKeysWithValues: entries.filter(\.isFolder).map { ($0.fileID, $0.filename) })
         let parentPairs: [(String, String)] = entries.compactMap { entry in
             guard let parentID = entry.parentID else { return nil }
@@ -382,7 +514,8 @@ final class MTPCommandService {
         func resolveFolderName(for fileID: String) -> String? {
             guard let parentID = parentByID[fileID], let parentName = foldersByID[parentID] else { return nil }
             if parentName.localizedCaseInsensitiveContains("music") {
-                if let grandparentID = parentByID[parentID], let grandparentName = foldersByID[grandparentID],
+                if let grandparentID = parentByID[parentID],
+                   let grandparentName = foldersByID[grandparentID],
                    !grandparentName.localizedCaseInsensitiveContains("music") {
                     return grandparentName
                 }
@@ -391,141 +524,144 @@ final class MTPCommandService {
             return parentName
         }
 
-        var audioFiles: [DeviceAudioFile] = []
-        var playlistEntries: [MTPRawEntry] = []
-
-        for entry in entries where !entry.isFolder {
-            if entry.isAudio {
-                audioFiles.append(DeviceAudioFile(
-                    id: "mtp:\(entry.fileID)",
-                    url: URL(string: "mtp://file/\(entry.fileID)") ?? URL(fileURLWithPath: entry.filename),
-                    fileName: entry.filename,
-                    byteCount: entry.fileSize,
-                    modifiedDate: nil,
-                    folderName: resolveFolderName(for: entry.fileID),
-                    mtpFileID: entry.fileID
-                ))
-            } else if entry.isPlaylist {
-                playlistEntries.append(entry)
-            }
-        }
-
-        var playlists: [DevicePlaylist] = []
-        var folderPlaylists: [String: [String]] = [:]
-
-        for file in audioFiles {
-            if let folder = file.folderName {
-                folderPlaylists[folder, default: []].append(file.fileName)
-            }
-        }
-
-        for (folder, tracks) in folderPlaylists.sorted(by: { $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending }) {
-            playlists.append(DevicePlaylist(
-                id: "folder:\(folder)",
-                name: folder,
-                trackFileNames: tracks.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending },
-                source: .folder
-            ))
-        }
-
-        for entry in playlistEntries {
-            let playlistName = (entry.filename as NSString).deletingPathExtension
-            let tracks = fetchPlaylistTrackNames(fileID: entry.fileID) ?? []
-            playlists.append(DevicePlaylist(
-                id: "m3u8:\(entry.fileID)",
-                name: playlistName,
-                trackFileNames: tracks,
-                source: .m3u8
-            ))
-        }
-
-        playlists.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        audioFiles.sort { $0.fileName.localizedCaseInsensitiveCompare($1.fileName) == .orderedAscending }
-
-        return MTPDeviceContents(
-            files: audioFiles,
-            playlists: playlists,
-            deviceName: parseMTPDeviceName(output),
-            diagnosticMessage: diagnosticMessage(
-                fileCount: audioFiles.count,
-                playlistCount: playlists.count,
-                rawObjectCount: entries.count
+        let audioFiles = entries.compactMap { entry -> DeviceAudioFile? in
+            guard !entry.isFolder, entry.isAudio else { return nil }
+            return DeviceAudioFile(
+                id: "mtp:\(entry.fileID)",
+                url: URL(string: "mtp://file/\(entry.fileID)") ?? URL(fileURLWithPath: entry.filename),
+                fileName: entry.filename,
+                byteCount: entry.fileSize,
+                modifiedDate: nil,
+                folderName: resolveFolderName(for: entry.fileID),
+                mtpFileID: entry.fileID,
+                mtpTrackID: nil
             )
-        )
+        }
+
+        return audioFiles.sorted { $0.fileName.localizedCaseInsensitiveCompare($1.fileName) == .orderedAscending }
     }
 
-    private func listDeviceTracks(
-        progress: @escaping @Sendable (String) -> Void,
-        deviceName: String?
-    ) throws -> MTPDeviceContents {
-        guard let mtpTracksURL = executableURL(named: "mtp-tracks") else {
-            throw MTPError.dependenciesMissing("mtp-tracks is not available. Reinstall MTP support.")
+    private func fileIDIndex(for files: [DeviceAudioFile]) -> [String: String] {
+        Dictionary(uniqueKeysWithValues: files.compactMap { file in
+            guard let id = file.mtpFileID ?? file.mtpTrackID else { return nil }
+            return (file.fileName.lowercased(), id)
+        })
+    }
+
+    private func buildSmartPlaylists(
+        mtpPlaylists: [DevicePlaylist],
+        audioFiles: [DeviceAudioFile]
+    ) -> [DevicePlaylist] {
+        var playlists = mtpPlaylists.filter { $0.trackCount > 0 }
+        var coveredTrackNames = Set(playlists.flatMap(\.trackFileNames).map { $0.lowercased() })
+
+        let byAlbum = Dictionary(grouping: audioFiles) { file in
+            file.folderName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         }
 
-        progress("Reading Garmin track index over MTP…")
-        let output = try runShellCapturing("\(shellQuoted(mtpTracksURL.path)) 2>&1", timeout: 120)
-        try Self.validateMTPOutput(output)
-        let trackEntries = parseMTPTracks(output)
+        for (album, albumFiles) in byAlbum.sorted(by: { $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending }) {
+            guard albumFiles.count >= 2, !album.isEmpty else { continue }
+            let trackNames = albumFiles.map(\.fileName)
+            let normalizedTracks = Set(trackNames.map { $0.lowercased() })
+            if normalizedTracks.isSubset(of: coveredTrackNames) { continue }
+            if isPerTrackAlbumName(album, tracks: trackNames) { continue }
 
-        var files = trackEntries.map { track in
-            DeviceAudioFile(
-                id: "mtp-track:\(track.trackID)",
-                url: URL(string: "mtp://track/\(track.trackID)") ?? URL(fileURLWithPath: track.displayFileName),
-                fileName: track.displayFileName,
-                byteCount: track.fileSize,
-                modifiedDate: nil,
-                folderName: track.album?.nilIfEmpty,
-                mtpFileID: track.trackID
-            )
-        }
-
-        files.sort { $0.fileName.localizedCaseInsensitiveCompare($1.fileName) == .orderedAscending }
-
-        var playlists = (try? listDevicePlaylists(knownFiles: files)) ?? []
-        let playlistTrackNames = Set(playlists.flatMap(\.trackFileNames).map { $0.lowercased() })
-        let byAlbum = Dictionary(grouping: files, by: { $0.folderName?.nilIfEmpty })
-        for (album, albumFiles) in byAlbum {
-            guard let album else { continue }
-            let albumTrackNames = albumFiles.map(\.fileName)
-            if !playlistTrackNames.isDisjoint(with: albumTrackNames.map { $0.lowercased() }) {
-                continue
-            }
             playlists.append(DevicePlaylist(
                 id: "album:\(album)",
                 name: album,
-                trackFileNames: albumTrackNames
-                    .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending },
+                trackFileNames: trackNames.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending },
                 source: .folder
             ))
+            coveredTrackNames.formUnion(normalizedTracks)
         }
-        playlists.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
 
-        return MTPDeviceContents(
-            files: files,
-            playlists: playlists,
-            deviceName: deviceName ?? parseMTPDeviceName(output),
-            diagnosticMessage: diagnosticMessage(
-                fileCount: files.count,
-                playlistCount: playlists.count,
-                rawObjectCount: trackEntries.count
-            )
-        )
+        let byFolder = Dictionary(grouping: audioFiles) { file in
+            file.folderName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        }
+
+        for (folder, folderFiles) in byFolder.sorted(by: { $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending }) {
+            guard folderFiles.count >= 2, !folder.isEmpty else { continue }
+            let trackNames = folderFiles.map(\.fileName)
+            if isPerTrackFolderName(folder, tracks: trackNames) { continue }
+
+            let normalizedTracks = Set(trackNames.map { $0.lowercased() })
+            if normalizedTracks.isSubset(of: coveredTrackNames) { continue }
+
+            playlists.append(DevicePlaylist(
+                id: "folder:\(folder)",
+                name: folder,
+                trackFileNames: trackNames.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending },
+                source: .folder
+            ))
+            coveredTrackNames.formUnion(normalizedTracks)
+        }
+
+        var seenNames: Set<String> = []
+        return playlists
+            .filter { playlist in
+                let key = playlist.name.lowercased()
+                guard !seenNames.contains(key) else { return false }
+                seenNames.insert(key)
+                return true
+            }
+            .sorted { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
     }
 
-    private func listDevicePlaylists(knownFiles: [DeviceAudioFile]) throws -> [DevicePlaylist] {
-        guard let mtpPlaylistsURL = executableURL(named: "mtp-playlists") else {
-            return []
+    private func isPerTrackFolderName(_ folder: String, tracks: [String]) -> Bool {
+        guard tracks.count == 1, let track = tracks.first else { return false }
+        let stem = (track as NSString).deletingPathExtension
+        let normalizedFolder = folder.lowercased()
+        let normalizedStem = stem.lowercased()
+        return normalizedFolder == normalizedStem
+            || normalizedFolder.contains(normalizedStem)
+            || normalizedStem.contains(normalizedFolder)
+    }
+
+    private func isPerTrackAlbumName(_ album: String, tracks: [String]) -> Bool {
+        guard tracks.count == 1, let track = tracks.first else { return false }
+        let stem = (track as NSString).deletingPathExtension
+        return album.localizedCaseInsensitiveCompare(stem) == .orderedSame
+    }
+
+    private func refreshFileIDIndex(merging existing: [String: String]) throws -> [String: String] {
+        guard let mtpConnectURL = executableURL(named: "mtp-connect"),
+              let mtpFilesURL = executableURL(named: "mtp-files") else {
+            return existing
         }
 
-        let output = try runShellCapturing("\(shellQuoted(mtpPlaylistsURL.path)) 2>&1", timeout: 45)
+        let output = try runConnectedCommands(
+            connectURL: mtpConnectURL,
+            commands: [shellQuoted(mtpFilesURL.path)],
+            timeout: 180
+        )
+        try Self.validateMTPOutput(output, allowNoPlaylists: true)
+
+        var merged = existing
+        for file in buildAudioFiles(from: parseMTPFilesystem(output)) {
+            if let id = file.mtpFileID {
+                merged[file.fileName.lowercased()] = id
+            }
+        }
+        return merged
+    }
+
+    private func resolveDownloadObjectID(for file: DeviceAudioFile, fileIDIndex: [String: String]) -> String? {
+        if let mtpFileID = file.mtpFileID { return mtpFileID }
+        if let indexed = fileIDIndex[file.fileName.lowercased()] { return indexed }
+        if let mtpTrackID = file.mtpTrackID { return mtpTrackID }
+        return nil
+    }
+
+    private func listDevicePlaylists(from output: String, knownFiles: [DeviceAudioFile]) throws -> [DevicePlaylist] {
         try Self.validateMTPOutput(output, allowNoPlaylists: true)
         let playlistEntries = parseMTPPlaylists(output)
         guard !playlistEntries.isEmpty else { return [] }
 
         let fileNameByMTPID = Dictionary(
             uniqueKeysWithValues: knownFiles.compactMap { file -> (String, String)? in
-                guard let mtpFileID = file.mtpFileID else { return nil }
-                return (mtpFileID, file.fileName)
+                let id = file.mtpFileID ?? file.mtpTrackID
+                guard let id else { return nil }
+                return (id, file.fileName)
             }
         )
 
@@ -539,6 +675,15 @@ final class MTPCommandService {
                 source: .mtpPlaylist
             )
         }
+    }
+
+    private func listDevicePlaylists(knownFiles: [DeviceAudioFile]) throws -> [DevicePlaylist] {
+        guard let mtpPlaylistsURL = executableURL(named: "mtp-playlists") else {
+            return []
+        }
+
+        let output = try runShellCapturing("\(shellQuoted(mtpPlaylistsURL.path)) 2>&1", timeout: 45)
+        return try listDevicePlaylists(from: output, knownFiles: knownFiles)
     }
 
     private func diagnosticMessage(fileCount: Int, playlistCount: Int, rawObjectCount: Int) -> String? {
@@ -578,35 +723,6 @@ final class MTPCommandService {
             }
         }
         return nil
-    }
-
-    private func fetchPlaylistTrackNames(fileID: String) -> [String]? {
-        guard let mtpGetFileURL = executableURL(named: "mtp-getfile") else { return nil }
-
-        let tempURL = fileManager.temporaryDirectory
-            .appendingPathComponent("GarminMusicManager-read-\(fileID).m3u8")
-
-        defer { try? fileManager.removeItem(at: tempURL) }
-
-        let command = """
-        \(Self.mtpEnvironment)
-        \(shellQuoted(mtpGetFileURL.path)) \(shellQuoted(fileID)) \(shellQuoted(tempURL.path)) 2>/dev/null
-        """
-        do {
-            try runShell(command, timeout: 60, surfaceOutput: false) { _ in }
-        } catch {
-            return nil
-        }
-
-        guard let text = try? String(contentsOf: tempURL, encoding: .utf8) else { return nil }
-        return parseM3UTrackNames(text)
-    }
-
-    private func parseM3UTrackNames(_ text: String) -> [String] {
-        text.split(separator: "\n", omittingEmptySubsequences: true)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.hasPrefix("#") && !$0.isEmpty }
-            .map { ($0 as NSString).lastPathComponent }
     }
 
     private func parseMTPFilesystem(_ output: String) -> [MTPRawEntry] {

@@ -35,6 +35,8 @@ final class AppModel: ObservableObject {
     @Published var connectedMTPDeviceName: String?
     @Published var deviceBrowseMessage: String?
 
+    private var garminFileIDByName: [String: String] = [:]
+    private var browseTask: Task<Void, Never>?
     private let detector = DeviceDetector()
     private let scanner = MusicScanner()
     private let syncService = SyncService()
@@ -521,7 +523,11 @@ final class AppModel: ObservableObject {
             isManagingDeviceFiles = true
             Task {
                 do {
-                    let count = try await mtpService.downloadFiles(files, to: destination) { [weak self] message in
+                    let count = try await mtpService.downloadFiles(
+                        files,
+                        to: destination,
+                        fileIDIndex: garminFileIDByName
+                    ) { [weak self] message in
                         Task { @MainActor in
                             self?.appendLog(message)
                         }
@@ -585,7 +591,7 @@ final class AppModel: ObservableObject {
     /// "On Device" panel. macOS will not mount the watch as a folder, so this is
     /// the only way to surface the existing library.
     func browseGarminMusicLibrary() {
-        guard !isBrowsingDevice else { return }
+        guard !isBrowsingDevice, !isManagingDeviceFiles else { return }
         guard hasMTPDestination else {
             deviceBrowseMessage = "No Garmin MTP device is connected. Connect the watch over USB and refresh."
             appendLog(deviceBrowseMessage ?? "No Garmin MTP device is connected.")
@@ -597,10 +603,11 @@ final class AppModel: ObservableObject {
             return
         }
 
+        browseTask?.cancel()
         isBrowsingDevice = true
         deviceBrowseMessage = nil
         appendLog("Loading Garmin music library over MTP…")
-        Task {
+        browseTask = Task {
             do {
                 let contents = try await mtpService.listDeviceMusicFiles { [weak self] message in
                     Task { @MainActor in
@@ -608,9 +615,11 @@ final class AppModel: ObservableObject {
                         if !trimmed.isEmpty { self?.appendLog(trimmed) }
                     }
                 }
+                guard !Task.isCancelled else { return }
                 deviceFiles = contents.files
                 devicePlaylists = contents.playlists
                 storageInfo = contents.storageInfo
+                garminFileIDByName = contents.fileIDByName
                 deviceBrowseMessage = contents.diagnosticMessage
                 isMTPLibraryLoaded = true
                 if let deviceName = contents.deviceName {
@@ -625,10 +634,13 @@ final class AppModel: ObservableObject {
                     appendLog(diagnosticMessage)
                 }
             } catch {
-                deviceBrowseMessage = error.localizedDescription
-                appendLog("Could not read Garmin library: \(error.localizedDescription)")
+                if !Task.isCancelled {
+                    deviceBrowseMessage = error.localizedDescription
+                    appendLog("Could not read Garmin library: \(error.localizedDescription)")
+                }
             }
             isBrowsingDevice = false
+            browseTask = nil
         }
     }
 
