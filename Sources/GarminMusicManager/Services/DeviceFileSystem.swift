@@ -425,7 +425,7 @@ final class MTPHelperClient {
 
         let outputURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("GarminMTPHelper-\(UUID().uuidString).json")
-        FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+        FileManager.default.createFile(atPath: outputURL.path, contents: nil, attributes: [.posixPermissions: 0o600])
         let outputHandle = try FileHandle(forWritingTo: outputURL)
         defer {
             try? outputHandle.close()
