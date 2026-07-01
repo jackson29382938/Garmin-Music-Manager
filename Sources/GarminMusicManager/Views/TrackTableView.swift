@@ -54,6 +54,8 @@ struct TrackTableView: View {
 
             if model.tracks.isEmpty {
                 dropZone
+            } else if displayedTrackIndices.isEmpty {
+                noResultsView
             } else {
                 List {
                     ForEach(displayedTrackIndices, id: \.self) { index in
@@ -75,16 +77,35 @@ struct TrackTableView: View {
     }
 
     private var dropZone: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 20) {
             Image(systemName: "music.note.list")
                 .font(.system(size: 48))
                 .foregroundStyle(.secondary)
-            Text("Mac Library is empty")
-                .font(.title3.bold())
-            Text("Drop Mac audio files here, or use Add Files / Add Folder.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
+
+            VStack(spacing: 6) {
+                Text("Mac Library is empty")
+                    .font(.title3.bold())
+                Text("Drop Mac audio files here, or use the buttons below.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+            }
+
+            HStack(spacing: 16) {
+                Button {
+                    model.chooseMusicFiles()
+                } label: {
+                    Label("Add Files", systemImage: "plus")
+                }
+
+                Button {
+                    model.chooseMusicFolder()
+                } label: {
+                    Label("Add Folder", systemImage: "folder.badge.plus")
+                }
+            }
+            .controlSize(.regular)
+            .buttonStyle(.bordered)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(isTargeted ? Color.accentColor.opacity(0.1) : Color.clear)
@@ -124,6 +145,27 @@ struct TrackTableView: View {
     private func trackDragProvider(for track: AudioTrack) -> NSItemProvider {
         NSItemProvider(contentsOf: track.url)
             ?? NSItemProvider(object: track.url.absoluteString as NSString)
+    }
+
+    private var noResultsView: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 48))
+                .foregroundStyle(.secondary)
+            Text("No results found")
+                .font(.title3.bold())
+            Text("Try a different search term or clear the search.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+
+            Button("Clear Search") {
+                model.searchText = ""
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.regular)
+            .padding(.top, 8)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 }
 
@@ -181,10 +223,12 @@ struct TrackRowView: View {
             Toggle("", isOn: $track.isSelected)
                 .labelsHidden()
                 .disabled(!track.compatibility.canCopy)
+                .accessibilityLabel("Select \(track.displayName)")
 
             Image(systemName: iconName)
                 .foregroundStyle(iconColor)
                 .frame(width: 20)
+                .accessibilityLabel(track.compatibility.status.rawValue)
         }
     }
 

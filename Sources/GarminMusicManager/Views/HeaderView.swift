@@ -51,12 +51,14 @@ struct PrimaryActionsToolbar: ToolbarContent {
             } label: {
                 Label("Add Files", systemImage: "plus")
             }
+            .keyboardShortcut("o", modifiers: .command)
 
             Button {
                 model.chooseMusicFolder()
             } label: {
                 Label("Add Folder", systemImage: "folder.badge.plus")
             }
+            .keyboardShortcut("o", modifiers: [.command, .shift])
 
             Button {
                 model.openAppleMusicBrowser()
@@ -70,6 +72,7 @@ struct PrimaryActionsToolbar: ToolbarContent {
                 Label("Select Ready", systemImage: "checkmark.circle")
             }
             .disabled(model.tracks.isEmpty)
+            .keyboardShortcut("a", modifiers: .command)
 
             Button(role: .destructive) {
                 model.clearTracks()
@@ -77,6 +80,7 @@ struct PrimaryActionsToolbar: ToolbarContent {
                 Label("Clear", systemImage: "trash")
             }
             .disabled(model.tracks.isEmpty)
+            .keyboardShortcut(.delete, modifiers: .command)
         }
     }
 }
