@@ -130,6 +130,14 @@ struct SidebarView: View {
                     Text("\(availableDescription(for: storage)) free of \(totalDescription(for: storage))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+
+                    if let total = storage.totalCapacity, total > 0, let available = storage.availableCapacity {
+                        let used = Double(total - available)
+                        ProgressView(value: used, total: Double(total))
+                            .tint(model.exceedsAvailableStorage ? .red : .accentColor)
+                            .accessibilityLabel("Storage usage")
+                    }
+
                     Text("\(storage.fileCount) files (\(ByteCountFormatter.string(fromByteCount: storage.usedByFiles, countStyle: .file)))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
