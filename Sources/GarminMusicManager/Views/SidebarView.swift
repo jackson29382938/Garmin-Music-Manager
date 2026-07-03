@@ -127,6 +127,15 @@ struct SidebarView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Storage")
                         .font(.headline)
+
+                    if let total = storage.totalCapacity, let available = storage.availableCapacity {
+                        let used = Double(max(0, total - available))
+                        ProgressView(value: used, total: Double(total))
+                            .tint(model.exceedsAvailableStorage ? .red : .accentColor)
+                            .accessibilityLabel("Storage usage")
+                            .accessibilityValue("\(availableDescription(for: storage)) free of \(totalDescription(for: storage))")
+                    }
+
                     Text("\(availableDescription(for: storage)) free of \(totalDescription(for: storage))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
