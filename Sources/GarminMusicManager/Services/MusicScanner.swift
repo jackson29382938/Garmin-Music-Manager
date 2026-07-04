@@ -45,13 +45,18 @@ final class MusicScanner {
     }
 
     func scanFiles(_ urls: [URL]) async -> [AudioTrack] {
-        var results: [AudioTrack] = []
-        results.reserveCapacity(urls.count)
-        for url in urls {
-            let track = await scanFile(url)
-            results.append(track)
+        await withTaskGroup(of: AudioTrack.self) { group in
+            for url in urls {
+                group.addTask { await self.scanFile(url) }
+            }
+
+            var results: [AudioTrack] = []
+            results.reserveCapacity(urls.count)
+            for await track in group {
+                results.append(track)
+            }
+            return results
         }
-        return results
     }
 
     func scanFile(_ url: URL) async -> AudioTrack {
@@ -60,10 +65,11 @@ final class MusicScanner {
         let byteCount = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
 
         let asset = AVURLAsset(url: url)
-        let durationSeconds = await loadDuration(from: asset)
-        let metadata = await loadCommonMetadata(from: asset)
-        let codec = await loadCodecHint(from: asset)
-        let compatibility = evaluateCompatibility(
+        async let durationSeconds = loadDuration(from: asset)
+        async let metadata = loadCommonMetadata(from: asset)
+        async let codec = loadCodecHint(from: asset)
+
+        let compatibility = await evaluateCompatibility(
             url: url,
             ext: ext,
             codecHint: codec,
@@ -71,7 +77,7 @@ final class MusicScanner {
             byteCount: byteCount
         )
 
-        return AudioTrack(
+        return await AudioTrack(
             url: url,
             fileName: url.lastPathComponent,
             fileExtension: ext,
