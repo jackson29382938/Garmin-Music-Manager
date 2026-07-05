@@ -45,13 +45,20 @@ final class MusicScanner {
     }
 
     func scanFiles(_ urls: [URL]) async -> [AudioTrack] {
-        var results: [AudioTrack] = []
-        results.reserveCapacity(urls.count)
-        for url in urls {
-            let track = await scanFile(url)
-            results.append(track)
+        await withTaskGroup(of: AudioTrack.self) { group in
+            for url in urls {
+                group.addTask {
+                    await self.scanFile(url)
+                }
+            }
+
+            var results: [AudioTrack] = []
+            results.reserveCapacity(urls.count)
+            for await track in group {
+                results.append(track)
+            }
+            return results
         }
-        return results
     }
 
     func scanFile(_ url: URL) async -> AudioTrack {
@@ -60,14 +67,19 @@ final class MusicScanner {
         let byteCount = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
 
         let asset = AVURLAsset(url: url)
-        let durationSeconds = await loadDuration(from: asset)
-        let metadata = await loadCommonMetadata(from: asset)
-        let codec = await loadCodecHint(from: asset)
+        async let durationSeconds = loadDuration(from: asset)
+        async let metadata = loadCommonMetadata(from: asset)
+        async let codec = loadCodecHint(from: asset)
+
+        let resolvedDuration = await durationSeconds
+        let resolvedMetadata = await metadata
+        let resolvedCodec = await codec
+
         let compatibility = evaluateCompatibility(
             url: url,
             ext: ext,
-            codecHint: codec,
-            metadata: metadata,
+            codecHint: resolvedCodec,
+            metadata: resolvedMetadata,
             byteCount: byteCount
         )
 
@@ -75,12 +87,12 @@ final class MusicScanner {
             url: url,
             fileName: url.lastPathComponent,
             fileExtension: ext,
-            title: metadata.title,
-            artist: metadata.artist,
-            album: metadata.album,
-            durationSeconds: durationSeconds,
+            title: resolvedMetadata.title,
+            artist: resolvedMetadata.artist,
+            album: resolvedMetadata.album,
+            durationSeconds: resolvedDuration,
             byteCount: byteCount,
-            codecHint: codec,
+            codecHint: resolvedCodec,
             compatibility: compatibility,
             isSelected: compatibility.canCopy
         )
