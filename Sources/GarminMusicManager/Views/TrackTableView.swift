@@ -30,7 +30,7 @@ struct TrackTableView: View {
                     Image(systemName: "laptopcomputer")
                 }
 
-                Text("\(model.syncableTracks.count) selected / \(model.tracks.count) total")
+                Text("\(model.syncableTracks.count) selected (\(ByteCountFormatter.string(fromByteCount: model.selectedTracksByteCount, countStyle: .file))) / \(model.tracks.count) total")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 

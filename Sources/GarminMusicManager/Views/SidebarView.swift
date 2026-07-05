@@ -127,12 +127,33 @@ struct SidebarView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Storage")
                         .font(.headline)
-                    Text("\(availableDescription(for: storage)) free of \(totalDescription(for: storage))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+
+                    if let total = storage.totalCapacity, total > 0 {
+                        ProgressView(
+                            value: Double(storage.usedByFiles),
+                            total: Double(total)
+                        ) {
+                            HStack {
+                                Text("\(availableDescription(for: storage)) free")
+                                Spacer()
+                                Text(totalDescription(for: storage))
+                            }
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        }
+                        .tint(model.exceedsAvailableStorage ? .red : .accentColor)
+                        .accessibilityLabel("Storage usage")
+                        .accessibilityValue("\(availableDescription(for: storage)) free of \(totalDescription(for: storage))")
+                    } else {
+                        Text("\(availableDescription(for: storage)) free of \(totalDescription(for: storage))")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+
                     Text("\(storage.fileCount) files (\(ByteCountFormatter.string(fromByteCount: storage.usedByFiles, countStyle: .file)))")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
+
                     if model.exceedsAvailableStorage {
                         Label("Selected tracks exceed free space", systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
