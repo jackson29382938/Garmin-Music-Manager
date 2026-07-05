@@ -123,7 +123,7 @@ final class MTPCommandService {
                 .appendingPathComponent("GarminMusicManager-MTP", isDirectory: true)
                 .appendingPathComponent(UUID().uuidString, isDirectory: true)
             let targetFolder = stagingRoot.appendingPathComponent(cleanPlaylistName, isDirectory: true)
-            try self.fileManager.createDirectory(at: targetFolder, withIntermediateDirectories: true)
+            try self.fileManager.createDirectory(at: targetFolder, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
             defer { try? self.fileManager.removeItem(at: stagingRoot) }
 
             var audioFiles: [(local: URL, remotePath: String, track: AudioTrack)] = []
@@ -1017,7 +1017,7 @@ final class MTPCommandService {
             "LC_ALL": "en_US.UTF-8",
             "LC_CTYPE": "en_US.UTF-8"
         ]) { _, new in new }
-        process.arguments = ["-lc", command]
+        process.arguments = ["-c", command]
 
         let pipe = Pipe()
         process.standardOutput = pipe
