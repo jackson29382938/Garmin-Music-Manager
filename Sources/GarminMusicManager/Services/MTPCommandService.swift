@@ -1017,7 +1017,7 @@ final class MTPCommandService {
             "LC_ALL": "en_US.UTF-8",
             "LC_CTYPE": "en_US.UTF-8"
         ]) { _, new in new }
-        process.arguments = ["-lc", command]
+        process.arguments = ["-c", command]
 
         let pipe = Pipe()
         process.standardOutput = pipe
