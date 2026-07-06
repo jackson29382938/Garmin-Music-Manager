@@ -45,13 +45,17 @@ final class MusicScanner {
     }
 
     func scanFiles(_ urls: [URL]) async -> [AudioTrack] {
-        var results: [AudioTrack] = []
-        results.reserveCapacity(urls.count)
-        for url in urls {
-            let track = await scanFile(url)
-            results.append(track)
+        await withTaskGroup(of: AudioTrack.self) { group in
+            for url in urls {
+                group.addTask { await self.scanFile(url) }
+            }
+            var results: [AudioTrack] = []
+            results.reserveCapacity(urls.count)
+            for await track in group {
+                results.append(track)
+            }
+            return results
         }
-        return results
     }
 
     func scanFile(_ url: URL) async -> AudioTrack {
@@ -60,14 +64,17 @@ final class MusicScanner {
         let byteCount = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
 
         let asset = AVURLAsset(url: url)
-        let durationSeconds = await loadDuration(from: asset)
-        let metadata = await loadCommonMetadata(from: asset)
-        let codec = await loadCodecHint(from: asset)
+        async let durationSeconds = loadDuration(from: asset)
+        async let metadata = loadCommonMetadata(from: asset)
+        async let codec = loadCodecHint(from: asset)
+
+        let (finalDuration, finalMetadata, finalCodec) = await (durationSeconds, metadata, codec)
+
         let compatibility = evaluateCompatibility(
             url: url,
             ext: ext,
-            codecHint: codec,
-            metadata: metadata,
+            codecHint: finalCodec,
+            metadata: finalMetadata,
             byteCount: byteCount
         )
 
@@ -75,12 +82,12 @@ final class MusicScanner {
             url: url,
             fileName: url.lastPathComponent,
             fileExtension: ext,
-            title: metadata.title,
-            artist: metadata.artist,
-            album: metadata.album,
-            durationSeconds: durationSeconds,
+            title: finalMetadata.title,
+            artist: finalMetadata.artist,
+            album: finalMetadata.album,
+            durationSeconds: finalDuration,
             byteCount: byteCount,
-            codecHint: codec,
+            codecHint: finalCodec,
             compatibility: compatibility,
             isSelected: compatibility.canCopy
         )
@@ -104,11 +111,10 @@ final class MusicScanner {
                 let value = try? await item.load(.stringValue)
                 return value?.nilIfEmpty
             }
-            return (
-                await stringValue(for: .commonKeyTitle),
-                await stringValue(for: .commonKeyArtist),
-                await stringValue(for: .commonKeyAlbumName)
-            )
+            async let title = stringValue(for: .commonKeyTitle)
+            async let artist = stringValue(for: .commonKeyArtist)
+            async let album = stringValue(for: .commonKeyAlbumName)
+            return await (title, artist, album)
         } catch {
             return (nil, nil, nil)
         }
