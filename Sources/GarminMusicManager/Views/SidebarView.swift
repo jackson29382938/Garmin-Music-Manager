@@ -20,6 +20,7 @@ struct SidebarView: View {
                     Button("Refresh") {
                         model.refreshDevices()
                     }
+                    .help("Refresh devices and library")
                 }
 
                 if model.devices.isEmpty {
@@ -127,6 +128,12 @@ struct SidebarView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Storage")
                         .font(.headline)
+
+                    ProgressView(value: storageProgress(for: storage))
+                        .tint(model.exceedsAvailableStorage ? .red : .accentColor)
+                        .accessibilityLabel("Storage usage")
+                        .accessibilityValue("\(Int(storageProgress(for: storage) * 100))% used")
+
                     Text("\(availableDescription(for: storage)) free of \(totalDescription(for: storage))")
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -162,5 +169,11 @@ struct SidebarView: View {
     private func totalDescription(for storage: DeviceStorageInfo) -> String {
         guard let total = storage.totalCapacity else { return "Unknown" }
         return ByteCountFormatter.string(fromByteCount: total, countStyle: .file)
+    }
+
+    private func storageProgress(for storage: DeviceStorageInfo) -> Double {
+        guard let total = storage.totalCapacity, total > 0 else { return 0 }
+        let used = total - (storage.availableCapacity ?? total)
+        return Double(used) / Double(total)
     }
 }
