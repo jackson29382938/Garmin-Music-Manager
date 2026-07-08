@@ -1,0 +1,19 @@
+.DS_Store
+**/.DS_Store
+
+# SwiftPM / Xcode
+**/.build/
+**/DerivedData/
+**/.swiftpm/
+*.xcodeproj
+*.xcworkspace
+xcuserdata/
+
+# Packaged app output (rebuild with `make app`)
+**/dist/
+
+# Temp / OS
+*.swp
+*~
+.idea/
+.vscode/

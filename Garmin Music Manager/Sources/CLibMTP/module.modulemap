@@ -1,0 +1,5 @@
+module CLibMTP [system] {
+  header "include/CLibMTP.h"
+  link "mtp"
+  export *
+}
