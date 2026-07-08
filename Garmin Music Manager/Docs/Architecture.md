@@ -145,10 +145,25 @@ Helper → app progress uses NDJSON **before** the final result line:
 - `DeviceBrowserStore` + `SyncCoordinator` remap chunk-local fractions into overall plan progress
 - UI: determinate bars in the transfer panel and device operation banner
 
+## Cancel mid-transfer
+
+User Cancel → `Task.cancel` + `MTPHelperClient.cancelInFlightHelper()`:
+
+1. Transport sends **SIGUSR1** to the helper (cooperative)
+2. Helper `MTPCancelState` flips; libmtp progress callback returns `1` → abort current file
+3. Between files, session checks cancel and returns `error.code == "cancelled"`
+4. If still stuck after ~2.5s, transport escalates to SIGTERM/SIGKILL
+5. Client maps `cancelled` → `CancellationError` (no retry)
+
+## Packaging
+
+`Scripts/package-app.sh` builds the `.app`, optionally bundles `libmtp`/`libusb`
+into `Contents/Frameworks`, signs inside-out (dylibs → helper → app), and can
+submit to Apple notarization when `NOTARIZE=1` + `CODESIGN_IDENTITY` +
+`NOTARY_PROFILE` are set.
+
 ## Remaining roadmap
 
 - **Metadata editor** — lightweight tag repair sheet
 - **Playlist import** — Apple Music XML, `.m3u` files
-- **Signed/notarized packaging** — distribution-ready `.app` bundle
 - **MTP move** — native in-place move when firmware supports it
-- **Cancel mid-file** — non-zero libmtp progress callback when Task is cancelled

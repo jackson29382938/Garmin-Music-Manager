@@ -79,9 +79,34 @@ Sources/GarminMusicManager/
 └── Utilities/     — Formatters, FileNameSanitizer
 ```
 
+## Package / distribute
+
+```bash
+make app                 # release .app in dist/ (ad-hoc sign, bundles libmtp when found)
+make app-debug
+```
+
+**Developer ID signing** (optional):
+
+```bash
+export CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+make app-signed
+```
+
+**Notarization** (optional, requires Developer ID + notarytool profile):
+
+```bash
+# One-time: xcrun notarytool store-credentials AC_PASSWORD --apple-id you@… --team-id TEAMID
+export CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
+export NOTARY_PROFILE="AC_PASSWORD"
+NOTARIZE=1 ./Scripts/package-app.sh
+```
+
+The packager copies `libmtp` + `libusb` into `Contents/Frameworks` and rewrites
+the helper’s install names so end users do not need Homebrew for MTP.
+
 ## Roadmap
 
 - Metadata editor
 - Playlist import from Apple Music XML or `.m3u`
-- Signed/notarized `.app` packaging
-- MTP in-place move (copy-then-delete)
+- MTP native in-place move when firmware supports it

@@ -174,6 +174,21 @@ final class MTPHelperClientTests: XCTestCase {
         XCTAssertEqual(line.progress, event)
         XCTAssertNil(line.asResponse)
     }
+
+    func testCancelledHelperErrorMapsToCancellationError() async {
+        let error = MTPHelperError(code: "cancelled", message: "Transfer cancelled.")
+        let data = try! encoded(MTPHelperResponse(ok: false, error: error))
+        let client = MTPHelperClient(transport: FakeTransport(result: .success(data)))
+
+        do {
+            _ = try await client.operationResult(request: MTPHelperRequest(operation: .upload))
+            XCTFail("Expected CancellationError")
+        } catch is CancellationError {
+            // expected
+        } catch {
+            XCTFail("Expected CancellationError, got \(error)")
+        }
+    }
 }
 
 private final class ProgressBox: @unchecked Sendable {

@@ -588,16 +588,20 @@ final class AppModel: ObservableObject {
         syncTask?.cancel()
         syncTask = nil
         isSyncing = false
+        // Mid-file abort: cooperative cancel inside the helper progress callback.
+        Task { await MTPHelperClient.cancelInFlightHelper() }
         appendLog("Sync cancelled.")
     }
 
     /// Cancels the in-flight device browse or file operation (refresh, upload,
-    /// copy, delete, move). Over MTP this terminates the helper subprocess.
+    /// copy, delete, move). Over MTP this asks the helper to abort the current
+    /// libmtp transfer (SIGUSR1), escalating to process kill if needed.
     func cancelDeviceOperation() {
         browseTask?.cancel()
         browseTask = nil
         deviceFileTask?.cancel()
         deviceFileTask = nil
+        Task { await MTPHelperClient.cancelInFlightHelper() }
         appendLog("Device operation cancelled.")
     }
 

@@ -215,10 +215,13 @@ final class LibMTPProgressBridge: @unchecked Sendable {
 }
 
 /// Global trampoline for `LIBMTP_progressfunc_t`.
-/// Returns 0 to continue; non-zero would cancel the transfer.
+/// Returns 0 to continue; non-zero aborts the current libmtp transfer.
 let libmtpProgressTrampoline: @convention(c) (UInt64, UInt64, UnsafeRawPointer?) -> Int32 = { sent, total, data in
+    if MTPCancelState.isCancelled {
+        return 1
+    }
     guard let data else { return 0 }
     let bridge = Unmanaged<LibMTPProgressBridge>.fromOpaque(data).takeUnretainedValue()
     bridge.emit(sent: sent, total: total)
-    return 0
+    return MTPCancelState.isCancelled ? 1 : 0
 }

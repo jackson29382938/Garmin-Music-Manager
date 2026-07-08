@@ -561,6 +561,13 @@ final class MTPHelperClient {
         await transport?.shutdown()
     }
 
+    /// Abort the current MTP transfer (cooperative SIGUSR1, then hard kill).
+    /// Prefer this on user Cancel so mid-file USB work stops promptly.
+    static func cancelInFlightHelper() async {
+        let transport = transportQueue.sync { sharedPersistent?.transport }
+        await transport?.interrupt()
+    }
+
     private static let transportQueue = DispatchQueue(label: "com.garminmusicmanager.mtp-helper-transport")
 
     private static func sharedPersistentTransport(for url: URL) -> PersistentMTPHelperTransport {
@@ -763,6 +770,8 @@ final class MTPHelperClient {
             do {
                 let data = try await transport.send(requestData, timeout: timeout, onProgress: onProgress)
                 return try Self.decodeResponse(from: data)
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 lastError = error
                 let transient = MTPRetryPolicy.isTransientError(error)
@@ -805,6 +814,9 @@ final class MTPHelperClient {
             )
         }
         if !response.ok, let error = response.error {
+            if error.code == "cancelled" {
+                throw CancellationError()
+            }
             throw error
         }
         return response

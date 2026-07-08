@@ -186,6 +186,8 @@ final class MTPDirectSession {
         var completedBytes: Int64 = 0
 
         for (index, file) in files.enumerated() {
+            try MTPCancelState.throwIfCancelled()
+
             guard let objectID = UInt32(file.objectID ?? "") else {
                 failures.append(file.name)
                 continue
@@ -256,6 +258,8 @@ final class MTPDirectSession {
         var completedBytes: Int64 = 0
 
         for (index, uploadFile) in uploadFiles.enumerated() {
+            try MTPCancelState.throwIfCancelled()
+
             let localURL = URL(fileURLWithPath: uploadFile.localPath)
             guard fileManager.fileExists(atPath: localURL.path), fileSize(at: localURL) > 0 else {
                 failures.append(uploadFile.displayName)
@@ -626,6 +630,7 @@ final class MTPDirectSession {
               verifyDownloadedFile(target, expectedSize: file.size) else {
             _ = drainErrorStack()
             try? fileManager.removeItem(at: target)
+            try MTPCancelState.throwIfCancelled()
             throw MTPHelperError(
                 code: "download-failed",
                 message: "Could not download \(file.name) from the Garmin."
@@ -763,6 +768,7 @@ final class MTPDirectSession {
             }
         }
         guard result == 0 else {
+            try MTPCancelState.throwIfCancelled()
             throw operationError(
                 code: "upload-failed",
                 message: "Could not upload \(remoteFileName) to the Garmin.",

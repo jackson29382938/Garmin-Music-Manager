@@ -35,6 +35,9 @@ actor PersistentMTPHelperTransport: MTPHelperTransport {
     private var readBuffer = Data()
     private var lastUsed = Date.distantPast
     private var idleWorkItem: DispatchWorkItem?
+    /// True while a request is in flight; cancel escalates SIGUSR1 → SIGTERM.
+    private var inFlight = false
+    private var cancelRequested = false
 
     init(helperURL: URL) {
         self.helperURL = helperURL
@@ -57,6 +60,10 @@ actor PersistentMTPHelperTransport: MTPHelperTransport {
             throw DeviceFileSystemError.helperFailed("The Garmin helper has no stdin pipe.")
         }
 
+        inFlight = true
+        cancelRequested = false
+        defer { inFlight = false }
+
         do {
             try stdinHandle.write(contentsOf: line)
         } catch {
@@ -70,15 +77,64 @@ actor PersistentMTPHelperTransport: MTPHelperTransport {
         scheduleIdleShutdown()
 
         let responseTimeout = max(timeout, defaultTimeoutFloor)
-        let data = try await readUntilFinalResponse(timeout: responseTimeout, onProgress: onProgress)
-        lastUsed = Date()
-        scheduleIdleShutdown()
-        return data
+        do {
+            let data = try await withTaskCancellationHandler {
+                try await readUntilFinalResponse(timeout: responseTimeout, onProgress: onProgress)
+            } onCancel: {
+                Task { await self.requestCancel() }
+            }
+            if cancelRequested || Task.isCancelled {
+                throw CancellationError()
+            }
+            lastUsed = Date()
+            scheduleIdleShutdown()
+            return data
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            if cancelRequested || Task.isCancelled {
+                throw CancellationError()
+            }
+            throw error
+        }
+    }
+
+    /// Cooperative mid-transfer cancel: SIGUSR1 asks the helper to abort the
+    /// current libmtp call via its progress callback; escalates to SIGTERM if
+    /// the process is still stuck shortly after.
+    func requestCancel() {
+        cancelRequested = true
+        guard let process, process.isRunning else { return }
+        let pid = process.processIdentifier
+        kill(pid, SIGUSR1)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 2.5) { [weak self] in
+            Task { await self?.escalateCancelIfNeeded(pid: pid) }
+        }
+    }
+
+    private func escalateCancelIfNeeded(pid: Int32) {
+        guard cancelRequested, let process, process.isRunning,
+              process.processIdentifier == pid else { return }
+        process.terminate()
+        DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
+            if process.isRunning {
+                kill(pid, SIGKILL)
+            }
+        }
     }
 
     func shutdown() {
         cancelIdleShutdown()
         terminateProcess()
+    }
+
+    /// Abort any in-flight request without dropping the shared transport registration.
+    func interrupt() {
+        requestCancel()
+        // Hard stop if nothing is marked in-flight (e.g. stuck open).
+        if !inFlight {
+            terminateProcess()
+        }
     }
 
     // MARK: Process lifecycle
@@ -188,6 +244,9 @@ actor PersistentMTPHelperTransport: MTPHelperTransport {
                     return final
                 }
                 restartProcess()
+                if cancelRequested || Task.isCancelled {
+                    throw CancellationError()
+                }
                 throw DeviceFileSystemError.helperFailed(
                     "The Garmin helper exited before producing a response."
                 )
@@ -360,7 +419,15 @@ struct SubprocessMTPHelperTransport: MTPHelperTransport {
         decoder.dateDecodingStrategy = .iso8601
 
         while finalLine == nil {
-            if box.isCancelled { throw CancellationError() }
+            if box.isCancelled {
+                // Cooperative cancel first so mid-file libmtp can abort cleanly.
+                kill(process.processIdentifier, SIGUSR1)
+                Thread.sleep(forTimeInterval: 0.4)
+                if process.isRunning {
+                    ProcessBox.terminate(process)
+                }
+                throw CancellationError()
+            }
             if Date() > deadline {
                 ProcessBox.terminate(process)
                 throw DeviceFileSystemError.helperFailed("The Garmin helper timed out.")
@@ -382,6 +449,11 @@ struct SubprocessMTPHelperTransport: MTPHelperTransport {
                    let progress = streamLine.progress {
                     onProgress?(progress)
                     continue
+                }
+                // Final cancelled response still counts as a finished request.
+                if let streamLine = try? decoder.decode(MTPHelperStreamLine.self, from: line),
+                   streamLine.error?.code == "cancelled" {
+                    throw CancellationError()
                 }
                 finalLine = line
                 break

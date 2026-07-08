@@ -5,6 +5,7 @@ import GarminMusicCore
 @main
 struct GarminMTPHelper {
     static func main() {
+        MTPCancelState.installSignalHandlers()
         let arguments = CommandLine.arguments
         let serveMode = arguments.contains("--serve")
         let output = JSONOutput.prepare()
@@ -36,6 +37,8 @@ struct GarminMTPHelper {
 
                 let response: MTPHelperResponse
                 do {
+                    // Each request starts clean; prior cancel must not poison the next op.
+                    MTPCancelState.reset()
                     let decoder = JSONDecoder()
                     decoder.dateDecodingStrategy = .iso8601
                     let request = try decoder.decode(MTPHelperRequest.self, from: Data(trimmed.utf8))
@@ -62,6 +65,7 @@ struct GarminMTPHelper {
 
     private static func runOneShot(output: FileHandle) {
         do {
+            MTPCancelState.reset()
             let requestData = FileHandle.standardInput.readDataToEndOfFile()
             let decoder = JSONDecoder()
             decoder.dateDecodingStrategy = .iso8601

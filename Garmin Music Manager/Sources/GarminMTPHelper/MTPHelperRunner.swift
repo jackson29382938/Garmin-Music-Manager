@@ -30,6 +30,7 @@ final class MTPHelperRunner {
 
     func handle(_ request: MTPHelperRequest) -> MTPHelperResponse {
         do {
+            try MTPCancelState.throwIfCancelled()
             switch request.operation {
             case .status:
                 return MTPHelperResponse(ok: true, dependencyStatus: dependencyStatus)
@@ -89,7 +90,7 @@ final class MTPHelperRunner {
                 )
             }
         } catch let error as MTPHelperError {
-            if Self.shouldDropSession(for: error) {
+            if error.code == "cancelled" || Self.shouldDropSession(for: error) {
                 closeSession()
             }
             return MTPHelperResponse(ok: false, dependencyStatus: dependencyStatus, error: error)
