@@ -6,20 +6,22 @@
   - `SyncSessionController` — preview + sync session façade over `SyncCoordinator`
   - `SyncCoordinator` — mounted + MTP sync plans/execution, conversion prep
   - `DeviceSessionController` — browse/upload/delete/move task lifecycle + device helpers
+  - `MacLibrarySession` — Mac import/scan, selection helpers, Apple Music plans, queue restore
   - `DeviceLibraryCoordinator` — browser configuration + duplicate detection
   - `DeviceOperationsCoordinator` — pure helpers (upload builders, delete policy, paths)
-  - `LibraryImportCoordinator` — Mac library import merge/scan helpers
+  - `LibraryImportCoordinator` — expand folders/playlists + merge helpers (used by MacLibrarySession)
   - `TransferLogStore` — capped transfer log
 - `Views/` — SwiftUI user interface (device UI reads `DeviceBrowserStore` directly)
 - `Models/` — devices, tracks, sync jobs, storage info
 - `Services/` — detection, scanning, sync, MTP client/transport, conversion
 - `Stores/` — `DeviceBrowserStore` for mounted-folder and MTP backends (source of truth for device listings)
-- `Persistence/` — `SettingsStore` (`UserDefaults`)
+- `Persistence/` — `SettingsStore` + `LibraryQueueStore` (Mac queue paths/selection)
 - `Utilities/` — formatters and filename sanitization
 
 `AppModel` remains the composition root and holds UI-published state. Long-running
 device work is owned by `DeviceSessionController` (tasks, MTP move originals,
-cancel). Sync work is owned by `SyncSessionController`.
+cancel). Sync work is owned by `SyncSessionController`. Mac library import /
+Apple Music / queue restore is owned by `MacLibrarySession`.
 
 ## Core package (`GarminMusicCore`)
 

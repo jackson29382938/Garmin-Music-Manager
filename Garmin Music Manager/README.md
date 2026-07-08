@@ -110,8 +110,10 @@ the helper’s install names so end users do not need Homebrew for MTP.
 ## Roadmap
 
 - Metadata editor (lightweight tag repair)
-- Apple Music XML playlist import (beyond `.m3u` / Music.app browser — `.m3u` import already ships)
+- Apple Music XML playlist import (beyond Music.app browser / `.m3u`)
 - MTP native in-place move when firmware supports it
+
+Already shipped: `.m3u` / `.m3u8` import; native MTP playlist create/update; **Sync Playlist** and **Send Selected** share one transfer engine (`SyncSessionController.run`).
 
 ## Release checklist
 

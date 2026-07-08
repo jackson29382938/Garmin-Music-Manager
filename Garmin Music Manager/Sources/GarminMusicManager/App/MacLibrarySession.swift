@@ -220,7 +220,7 @@ final class MacLibrarySession {
         for index in scanned.indices {
             let path = scanned[index].url.standardizedFileURL.path
             if let selected = restored.selection[path] {
-                scanned[index].isSelected = selected
+                scanned[index].isSelected = selected && scanned[index].compatibility.canCopy
             }
         }
         return ImportResult(

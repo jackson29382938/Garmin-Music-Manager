@@ -166,7 +166,7 @@ if [[ "$BUNDLE_LIBS" != "0" ]]; then
     OLD_MTP="$(otool -L "$MACOS_DIR/$HELPER_NAME" | awk '/libmtp/{print $1; exit}')"
     if [[ -n "${OLD_MTP:-}" ]]; then
       install_name_tool -change "$OLD_MTP" "@executable_path/../Frameworks/$(basename "$BUNDLED_MTP")" \
-        "$MACOS_DIR/$HELPER_NAME"
+        "$MACOS_DIR/$HELPER_NAME" 2>/dev/null || true
     fi
     install_name_tool -add_rpath "@executable_path/../Frameworks" "$MACOS_DIR/$HELPER_NAME" 2>/dev/null || true
   else
@@ -207,16 +207,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<PLIST
 </plist>
 PLIST
 
-sign_item() {
-  local target="$1"
-  local identity="$2"
-  local extra=()
-  if [[ "$identity" != "-" ]]; then
-    extra+=(--options runtime --timestamp)
-  fi
-  codesign --force --sign "$identity" "${extra[@]}" "$target"
-}
-
+# Signing is best-effort for local/ad-hoc builds; never abort the package script.
 if command -v codesign >/dev/null 2>&1; then
   IDENTITY="${CODESIGN_IDENTITY:--}"
   if [[ "$IDENTITY" == "-" ]]; then
@@ -225,20 +216,30 @@ if command -v codesign >/dev/null 2>&1; then
     echo "==> Signing with identity: $IDENTITY"
   fi
 
-  # Sign nested dylibs first, then helper, then app (inside-out).
+  set +e
+  # Inside-out: dylibs → helper → app. Keep set +e so ad-hoc failures never abort packaging.
   if [[ -d "$FRAMEWORKS_DIR" ]]; then
     find "$FRAMEWORKS_DIR" -type f \( -name "*.dylib" -o -name "*.so" \) | while read -r lib; do
-      sign_item "$lib" "$IDENTITY" 2>/dev/null || true
+      if [[ "$IDENTITY" != "-" ]]; then
+        codesign --force --sign "$IDENTITY" --options runtime --timestamp "$lib" 2>/dev/null
+      else
+        codesign --force --sign "$IDENTITY" "$lib" 2>/dev/null
+      fi
     done
   fi
-  sign_item "$MACOS_DIR/$HELPER_NAME" "$IDENTITY" 2>/dev/null || true
-  codesign --force --deep --sign "$IDENTITY" \
-    $([ "$IDENTITY" != "-" ] && echo --options runtime --timestamp) \
-    "$APP_DIR" 2>/dev/null \
-    || echo "warning: codesign failed (app may still run locally)" >&2
+  if [[ "$IDENTITY" != "-" ]]; then
+    codesign --force --sign "$IDENTITY" --options runtime --timestamp "$MACOS_DIR/$HELPER_NAME" 2>/dev/null
+    codesign --force --deep --sign "$IDENTITY" --options runtime --timestamp "$APP_DIR" 2>/dev/null \
+      || echo "warning: codesign failed (app may still run locally)" >&2
+  else
+    codesign --force --sign "$IDENTITY" "$MACOS_DIR/$HELPER_NAME" 2>/dev/null
+    codesign --force --deep --sign "$IDENTITY" "$APP_DIR" 2>/dev/null \
+      || echo "warning: codesign failed (app may still run locally)" >&2
+  fi
 
   echo "==> codesign verify"
-  codesign --verify --verbose=2 "$APP_DIR" 2>&1 | tail -5 || true
+  codesign --verify --verbose=2 "$APP_DIR" 2>&1 | tail -5
+  set -e
 else
   echo "warning: codesign not available" >&2
 fi
