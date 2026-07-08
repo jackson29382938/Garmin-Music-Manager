@@ -1,5 +1,15 @@
 import Foundation
 
+/// Pure helpers for MTP playlist create-vs-update decisions (no USB required).
+public enum MTPPlaylistNameMatch {
+    /// First playlist whose name matches `desired` case-insensitively.
+    public static func existingID(named desired: String, names: [(id: UInt32, name: String)]) -> UInt32? {
+        names.first {
+            $0.name.localizedCaseInsensitiveCompare(desired) == .orderedSame
+        }?.id
+    }
+}
+
 public enum PathSanitizer {
     private static let invalidFileNameCharacters = CharacterSet(charactersIn: "/\\?%*|\"<>:")
 

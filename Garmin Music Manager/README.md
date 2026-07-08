@@ -110,9 +110,8 @@ the helper’s install names so end users do not need Homebrew for MTP.
 ## Roadmap
 
 - Metadata editor (lightweight tag repair)
-- Apple Music XML playlist import (beyond `.m3u` / Music.app browser)
+- Apple Music XML playlist import (beyond `.m3u` / Music.app browser — `.m3u` import already ships)
 - MTP native in-place move when firmware supports it
-- Update existing native MTP playlists when the name already exists (today each sync may create a new playlist)
 
 ## Release checklist
 

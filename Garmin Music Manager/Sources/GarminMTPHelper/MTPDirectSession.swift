@@ -435,10 +435,13 @@ final class MTPDirectSession {
     private func createOrUpdatePlaylistOnce(name: String, trackIDs: [UInt32]) throws -> PlaylistWriteAction {
         // Prefer updating an existing playlist with the same name so re-syncs
         // do not pile up duplicate playlists on the watch.
-        if let existing = loadPlaylistRecords().first(where: {
-            $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
-        }) {
-            try writePlaylist(name: name, trackIDs: trackIDs, existingID: existing.id, update: true)
+        let records = loadPlaylistRecords()
+        let existingID = MTPPlaylistNameMatch.existingID(
+            named: name,
+            names: records.map { (id: $0.id, name: $0.name) }
+        )
+        if let existingID {
+            try writePlaylist(name: name, trackIDs: trackIDs, existingID: existingID, update: true)
             return .updated
         }
         try writePlaylist(name: name, trackIDs: trackIDs, existingID: 0, update: false)

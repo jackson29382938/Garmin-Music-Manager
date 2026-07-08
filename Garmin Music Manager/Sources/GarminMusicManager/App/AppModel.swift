@@ -397,45 +397,21 @@ final class AppModel: ObservableObject {
     }
 
     func chooseMusicFiles() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose music files"
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowedContentTypes = MusicScanner.supportedPickerTypes
-
-        if panel.runModal() == .OK {
-            Task { await addFiles(panel.urls) }
+        macLibrarySession.chooseMusicFiles { [weak self] urls in
+            Task { await self?.addFiles(urls) }
         }
     }
 
     func chooseMusicFolder() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose a folder containing music"
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-
-        if panel.runModal() == .OK, let url = panel.url {
-            // Folder expansion (including nested .m3u files) happens in `addFiles`.
-            Task { await addFiles([url]) }
+        macLibrarySession.chooseMusicFolder { [weak self] urls in
+            Task { await self?.addFiles(urls) }
         }
     }
 
     /// Import local tracks referenced by an `.m3u` / `.m3u8` playlist file.
+    /// Import local tracks referenced by an `.m3u` / `.m3u8` playlist file.
     func chooseM3UPlaylist() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose a playlist file"
-        panel.message = "Import local tracks listed in an .m3u or .m3u8 file."
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowedContentTypes = ["m3u", "m3u8"].compactMap { UTType(filenameExtension: $0) }
-        if panel.allowedContentTypes.isEmpty {
-            panel.allowsOtherFileTypes = true
-        }
-
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard let url = macLibrarySession.chooseM3UPlaylistURL() else { return }
         Task { await importM3UPlaylist(from: url) }
     }
 
@@ -444,7 +420,6 @@ final class AppModel: ObservableObject {
         if !name.isEmpty {
             playlistName = name
         }
-        // Expansion + local-path filtering happens in `addFiles` / MusicScanner.
         await addFiles([url])
     }
 
@@ -510,26 +485,22 @@ final class AppModel: ObservableObject {
     }
 
     func addFiles(_ urls: [URL]) async {
-        guard !urls.isEmpty else { return }
-        isScanning = true
-        defer { isScanning = false }
-
-        let expansion = libraryImportCoordinator.expandImportURLs(urls)
-        guard !expansion.audioURLs.isEmpty else {
-            if expansion.playlistsExpanded > 0 {
-                appendLog("No local tracks found in the selected playlist(s). Remote/streaming entries are skipped.")
-            }
-            return
-        }
-
-        let scanned = await scanner.scanFiles(expansion.audioURLs)
-        mergeTracks(scanned)
+        let result = await macLibrarySession.addFiles(
+            urls,
+            into: tracks,
+            setScanning: { [weak self] value in self?.isScanning = value }
+        )
+        tracks = result.tracks
         updateDuplicateFlags()
-        var message = "Added \(scanned.count) file(s). \(syncableTracks.count) selected and ready."
-        if expansion.playlistsExpanded > 0 {
-            message += " Expanded \(expansion.playlistsExpanded) playlist file(s)."
+        if result.addedCount > 0 {
+            var message = result.message ?? "Added \(result.addedCount) file(s)."
+            if !message.contains("selected and ready") {
+                message += " \(syncableTracks.count) selected and ready."
+            }
+            appendLog(message)
+        } else if let message = result.message {
+            appendLog(message)
         }
-        appendLog(message)
     }
 
     func handleDroppedURLs(_ urls: [URL]) {
@@ -537,45 +508,34 @@ final class AppModel: ObservableObject {
     }
 
     func removeTracks(at offsets: IndexSet) {
-        let filtered = filteredTracks
-        let idsToRemove = offsets.map { filtered[$0].id }
-        tracks.removeAll { idsToRemove.contains($0.id) }
+        tracks = macLibrarySession.removeTracks(at: offsets, filtered: filteredTracks, from: tracks)
     }
 
     func clearTracks() {
         tracks.removeAll()
         lastFailedTrackIDs = []
-        libraryQueueStore.clear()
+        macLibrarySession.clearPersistedQueue()
         appendLog("Cleared all tracks.")
     }
 
     private func restoreLibraryQueueIfNeeded() async {
-        let restored = libraryQueueStore.restoreExisting()
-        guard !restored.urls.isEmpty else { return }
-        isScanning = true
-        defer { isScanning = false }
-        var scanned = await scanner.scanFiles(restored.urls)
-        for index in scanned.indices {
-            let path = scanned[index].url.standardizedFileURL.path
-            if let selected = restored.selection[path] {
-                scanned[index].isSelected = selected && scanned[index].compatibility.canCopy
-            }
-        }
-        tracks = scanned
+        guard tracks.isEmpty else { return }
+        guard let result = await macLibrarySession.restoreQueue(
+            setScanning: { [weak self] value in self?.isScanning = value }
+        ) else { return }
+        tracks = result.tracks
         updateDuplicateFlags()
-        appendLog("Restored \(scanned.count) track(s) from the previous session.")
+        if let message = result.message {
+            appendLog(message)
+        }
     }
 
     func selectAllReady() {
-        for index in tracks.indices {
-            tracks[index].isSelected = tracks[index].compatibility.canCopy
-        }
+        tracks = macLibrarySession.selectAllReady(in: tracks)
     }
 
     func deselectAll() {
-        for index in tracks.indices {
-            tracks[index].isSelected = false
-        }
+        tracks = macLibrarySession.deselectAll(in: tracks)
     }
 
     func refreshDeviceContents(at destination: URL? = nil) {
@@ -694,16 +654,14 @@ final class AppModel: ObservableObject {
     }
 
     /// Re-selects only tracks that failed the last MTP transfer and starts a new sync.
+    /// Re-selects only tracks that failed the last MTP transfer and starts a new sync.
     func retryFailedTransfers() {
         guard canRetryFailedTransfers else {
             appendLog("Nothing to retry.")
             return
         }
-        let retryIDs = lastFailedTrackIDs
-        for index in tracks.indices {
-            tracks[index].isSelected = retryIDs.contains(tracks[index].id) && tracks[index].compatibility.canCopy
-        }
-        let count = tracks.filter(\.isSelected).count
+        tracks = macLibrarySession.selectOnly(ids: lastFailedTrackIDs, in: tracks)
+        let count = tracks.filter { $0.isSelected }.count
         appendLog("Retrying \(count) failed track(s)…")
         prepareSyncPreview()
     }
@@ -915,37 +873,33 @@ final class AppModel: ObservableObject {
     func loadAppleMusicLibrary() {
         musicLibraryStatus = .loading
         Task {
-            do {
-                let snapshot = try await Task.detached(priority: .userInitiated) { [appleMusic] in
-                    try appleMusic.loadSnapshot()
-                }.value
+            switch await macLibrarySession.loadAppleMusicLibrary() {
+            case .loaded(let snapshot, let message):
                 musicLibrary = snapshot
                 musicLibraryStatus = .loaded(
                     playlistCount: snapshot.playlists.count,
                     albumCount: snapshot.albums.count,
                     trackCount: snapshot.tracksByID.count
                 )
-                appendLog("Loaded Apple Music library: \(snapshot.playlists.count) playlists, \(snapshot.albums.count) albums.")
-            } catch {
-                musicLibraryStatus = .unavailable(error.localizedDescription)
-                appendLog("Apple Music load failed: \(error.localizedDescription)")
+                appendLog(message)
+            case .failed(let message):
+                let detail = message.replacingOccurrences(of: "Apple Music load failed: ", with: "")
+                musicLibraryStatus = .unavailable(detail)
+                appendLog(message)
             }
         }
     }
 
     func importLibraryTracks(_ trackIDs: [String]) {
-        let urls = musicLibrary.importableURLs(for: trackIDs)
-        let total = trackIDs.count
-        let skipped = total - urls.count
-        guard !urls.isEmpty else {
-            appendLog("No importable local files in selection (\(skipped) cloud-only or DRM-protected).")
-            return
+        let plan = macLibrarySession.planImportLibraryTracks(trackIDs: trackIDs, musicLibrary: musicLibrary)
+        for line in plan.logMessages {
+            appendLog(line)
         }
-        if skipped > 0 {
-            appendLog("Skipping \(skipped) cloud-only/DRM track(s); importing \(urls.count).")
+        guard !plan.urls.isEmpty else { return }
+        if plan.closeBrowser {
+            showAppleMusicBrowser = false
         }
-        showAppleMusicBrowser = false
-        Task { await addFiles(urls) }
+        Task { await addFiles(plan.urls) }
     }
 
     func prepareAppleMusicPlaylistForSync(_ playlistID: String) {
@@ -953,23 +907,22 @@ final class AppModel: ObservableObject {
     }
 
     func prepareAppleMusicPlaylistForSyncNow(_ playlistID: String) async {
-        guard let playlist = musicLibrary.playlists.first(where: { $0.id == playlistID }) else {
-            appendLog("Choose an Apple Music playlist first.")
-            return
+        let plan = macLibrarySession.planAppleMusicPlaylist(playlistID: playlistID, musicLibrary: musicLibrary)
+        for line in plan.logMessages {
+            appendLog(line)
         }
-
-        let urls = musicLibrary.importableURLs(for: playlist.trackIDs)
-        let skipped = playlist.trackIDs.count - urls.count
-        guard !urls.isEmpty else {
-            appendLog("No importable local files in \(playlist.name) (\(skipped) cloud-only or DRM-protected).")
-            return
+        guard !plan.urls.isEmpty else { return }
+        if let name = plan.playlistName {
+            playlistName = name
         }
-
-        playlistName = playlist.name
-        showAppleMusicBrowser = false
-        await replaceTracks(with: urls)
-        let skippedText = skipped > 0 ? " Skipped \(skipped) cloud-only/DRM track(s)." : ""
-        appendLog("Prepared \(playlist.name) for Garmin sync with \(urls.count) local track(s).\(skippedText)")
+        if plan.closeBrowser {
+            showAppleMusicBrowser = false
+        }
+        if plan.replaceQueue {
+            await replaceTracks(with: plan.urls)
+        } else {
+            await addFiles(plan.urls)
+        }
     }
 
     func requestResetAppState() {
@@ -988,7 +941,7 @@ final class AppModel: ObservableObject {
         searchText = ""
         tracks.removeAll()
         lastFailedTrackIDs = []
-        libraryQueueStore.clear()
+        macLibrarySession.clearPersistedQueue()
         musicLibrary = .empty
         musicLibraryStatus = .idle
         showAppleMusicBrowser = false
@@ -1040,16 +993,12 @@ final class AppModel: ObservableObject {
     }
 
     private func replaceTracks(with urls: [URL]) async {
-        guard !urls.isEmpty else { return }
-        isScanning = true
-        defer { isScanning = false }
-
-        tracks = await scanner.scanFiles(urls)
+        let result = await macLibrarySession.replaceTracks(
+            with: urls,
+            setScanning: { [weak self] value in self?.isScanning = value }
+        )
+        tracks = result.tracks
         updateDuplicateFlags()
-    }
-
-    private func mergeTracks(_ newTracks: [AudioTrack]) {
-        tracks = libraryImportCoordinator.mergeTracks(existing: tracks, newTracks: newTracks)
     }
 
     private func appendLog(_ message: String) {
