@@ -199,9 +199,7 @@ enum MTPSyncPlanner {
     }
 
     private static func isIdentical(track: AudioTrack, existing: DeviceFile) -> Bool {
-        guard track.byteCount > 0, existing.size > 0 else { return false }
-        return track.byteCount == existing.size
-            && FileNameSanitizer.safeFileName(for: track).localizedCaseInsensitiveCompare(existing.name) == .orderedSame
+        TrackMatching.isIdentical(track: track, existing: existing)
     }
 
     private static func uniqueRemotePath(preferredPath: String, reservedPaths: inout Set<String>) -> String {

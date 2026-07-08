@@ -4,17 +4,50 @@ struct MTPDependencyStatus: Equatable {
     let homebrewURL: URL?
     let libmtpLibraryURL: URL?
     let libmtpHeaderURL: URL?
+    /// Path to `GarminMTPHelper` (bundled in the .app, or beside a SwiftPM build).
+    let helperURL: URL?
+    /// Bundled `libmtp` inside the .app Frameworks folder (no Homebrew required).
+    let bundledLibmtpURL: URL?
 
+    /// Runtime readiness: a helper binary plus a loadable libmtp (bundled or system).
+    /// Headers are a *build* dependency only and are not required here.
     var isReady: Bool {
-        libmtpLibraryURL != nil && libmtpHeaderURL != nil
+        guard helperURL != nil else { return false }
+        if bundledLibmtpURL != nil { return true }
+        return libmtpLibraryURL != nil
+    }
+
+    /// True when installing Homebrew/libmtp is a useful recovery path.
+    var canInstallViaHomebrew: Bool {
+        !isReady && bundledLibmtpURL == nil
     }
 
     var message: String {
-        if isReady { return "MTP support ready (direct libmtp)." }
-        if homebrewURL == nil { return "Homebrew and libmtp are not installed." }
-        if libmtpLibraryURL == nil { return "Homebrew is installed, but the libmtp library is missing." }
-        return "Homebrew is installed, but the libmtp headers are missing."
+        if isReady {
+            if bundledLibmtpURL != nil {
+                return "MTP support ready (bundled helper + libmtp)."
+            }
+            return "MTP support ready (direct libmtp)."
+        }
+        if helperURL == nil {
+            return "Garmin MTP helper is missing. Rebuild the app (make app) or run from the package directory."
+        }
+        if bundledLibmtpURL == nil, libmtpLibraryURL == nil {
+            if homebrewURL == nil {
+                return "libmtp is not available. Use Install MTP (Homebrew) or open the packaged app that bundles libmtp."
+            }
+            return "Homebrew is installed, but the libmtp library is missing. Use Install MTP to install it."
+        }
+        return "MTP support is not ready."
     }
+
+    static let unavailable = MTPDependencyStatus(
+        homebrewURL: nil,
+        libmtpLibraryURL: nil,
+        libmtpHeaderURL: nil,
+        helperURL: nil,
+        bundledLibmtpURL: nil
+    )
 }
 
 final class MTPDependencyManager {
@@ -27,16 +60,21 @@ final class MTPDependencyManager {
     """
 
     func dependencyStatus() -> MTPDependencyStatus {
-        MTPDependencyStatus(
+        let helper = MTPHelperClient.locateHelper()
+        return MTPDependencyStatus(
             homebrewURL: executableURL(named: "brew"),
             libmtpLibraryURL: firstExistingPath([
                 "/opt/homebrew/lib/libmtp.dylib",
-                "/usr/local/lib/libmtp.dylib"
+                "/opt/homebrew/lib/libmtp.9.dylib",
+                "/usr/local/lib/libmtp.dylib",
+                "/usr/local/lib/libmtp.9.dylib"
             ]),
             libmtpHeaderURL: firstExistingPath([
                 "/opt/homebrew/include/libmtp.h",
                 "/usr/local/include/libmtp.h"
-            ])
+            ]),
+            helperURL: helper,
+            bundledLibmtpURL: bundledLibmtpURL(nearHelper: helper)
         )
     }
 
@@ -60,7 +98,8 @@ final class MTPDependencyManager {
               echo "Homebrew already installed."
             fi
 
-            if [ ! -f /opt/homebrew/lib/libmtp.dylib ] && [ ! -f /usr/local/lib/libmtp.dylib ]; then
+            if [ ! -f /opt/homebrew/lib/libmtp.dylib ] && [ ! -f /opt/homebrew/lib/libmtp.9.dylib ] \
+               && [ ! -f /usr/local/lib/libmtp.dylib ] && [ ! -f /usr/local/lib/libmtp.9.dylib ]; then
               echo "Installing libmtp..."
               brew install libmtp
             elif [ ! -f /opt/homebrew/include/libmtp.h ] && [ ! -f /usr/local/include/libmtp.h ]; then
@@ -75,6 +114,26 @@ final class MTPDependencyManager {
                 progress(line)
             }
         }.value
+    }
+
+    /// libmtp shipped inside a packaged .app next to the helper binary.
+    func bundledLibmtpURL(nearHelper helperURL: URL?) -> URL? {
+        guard let helperURL else { return nil }
+        let macosDir = helperURL.deletingLastPathComponent()
+        let candidates = [
+            macosDir.deletingLastPathComponent().appendingPathComponent("Frameworks"),
+            macosDir.appendingPathComponent("Frameworks")
+        ]
+        let names = ["libmtp.9.dylib", "libmtp.dylib"]
+        for directory in candidates {
+            for name in names {
+                let url = directory.appendingPathComponent(name)
+                if fileManager.fileExists(atPath: url.path) {
+                    return url
+                }
+            }
+        }
+        return nil
     }
 
     private func executableURL(named name: String) -> URL? {

@@ -65,7 +65,9 @@ final class SyncCoordinator {
                 skippedCount: skipped,
                 replacedCount: 0,
                 failedCount: 0,
-                playlistName: playlist
+                playlistName: playlist,
+                failedItems: [],
+                failedTrackIDs: []
             )
         }
 
@@ -73,7 +75,13 @@ final class SyncCoordinator {
 
         guard !uploads.isEmpty else {
             progress(1, nil)
-            return MTPSyncResult(uploadedCount: 0, skippedCount: skipped, replacedCount: 0, failedCount: 0)
+            return MTPSyncResult(
+                uploadedCount: 0,
+                skippedCount: skipped,
+                replacedCount: 0,
+                failedCount: 0,
+                failedTrackIDs: []
+            )
         }
 
         // Chunk uploads for partial recovery. Progress comes from libmtp NDJSON
@@ -147,15 +155,15 @@ final class SyncCoordinator {
         }
 
         let failedNames = Set(failedItems)
-        let failedRemotePaths = Set(
-            plan.items.compactMap { item -> String? in
-                guard failedNames.contains(item.track.displayName) ||
-                        (item.uploadFile.map { failedNames.contains($0.displayName) } ?? false) ||
-                        failedNames.contains(item.targetRemotePath)
-                else { return nil }
-                return MTPSyncPlanner.normalizePath(item.targetRemotePath)
-            }
-        )
+        let failedPlanItems = plan.items.filter { item in
+            guard item.action != .skipIdentical else { return false }
+            if failedNames.contains(item.track.displayName) { return true }
+            if let upload = item.uploadFile, failedNames.contains(upload.displayName) { return true }
+            if failedNames.contains(item.targetRemotePath) { return true }
+            return false
+        }
+        let failedRemotePaths = Set(failedPlanItems.map { MTPSyncPlanner.normalizePath($0.targetRemotePath) })
+        let failedTrackIDs = failedPlanItems.map(\.track.id)
         let replacedCount = plan.items.filter { item in
             guard item.action == .replace else { return false }
             let pathKey = MTPSyncPlanner.normalizePath(item.targetRemotePath)
@@ -176,7 +184,8 @@ final class SyncCoordinator {
                 failedCount: failedItems.count,
                 wasCancelled: true,
                 playlistName: nil,
-                failedItems: failedItems
+                failedItems: failedItems,
+                failedTrackIDs: failedTrackIDs
             )
         }
 
@@ -194,7 +203,7 @@ final class SyncCoordinator {
         )
 
         if refreshAfter, playlist != nil {
-            // Pull playlist collection into the browser after create.
+            // Pull playlist collection into the browser after create/update.
             await deviceBrowser.refresh(force: true)
         }
 
@@ -207,7 +216,8 @@ final class SyncCoordinator {
             failedCount: failedItems.count,
             wasCancelled: false,
             playlistName: playlist,
-            failedItems: failedItems
+            failedItems: failedItems,
+            failedTrackIDs: failedTrackIDs
         )
     }
 
@@ -238,7 +248,7 @@ final class SyncCoordinator {
         }
 
         let cleanName = FileNameSanitizer.sanitizeFileName(playlistName)
-        progress(0.95, "Creating playlist “\(cleanName)”…")
+        progress(0.95, "Writing playlist “\(cleanName)”…")
         if let result = await deviceBrowser.createPlaylist(name: cleanName, tracks: tracks) {
             progress(0.98, result.message)
             return cleanName

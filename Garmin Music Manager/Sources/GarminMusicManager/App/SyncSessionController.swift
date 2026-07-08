@@ -84,7 +84,7 @@ final class SyncSessionController {
         onProgress: @escaping @MainActor (Double, String?) -> Void,
         onLog: @escaping @MainActor (String) -> Void,
         onMountedComplete: @escaping @MainActor (URL) -> Void,
-        onMTPComplete: @escaping @MainActor () -> Void
+        onMTPComplete: @escaping @MainActor (MTPSyncResult) -> Void
     ) async {
         syncTask?.cancel()
         guard !tracks.isEmpty else {
@@ -174,7 +174,7 @@ final class SyncSessionController {
         configureMTP: @escaping () -> Void,
         onProgress: @escaping @MainActor (Double, String?) -> Void,
         onLog: @escaping @MainActor (String) -> Void,
-        onComplete: @escaping @MainActor () -> Void
+        onComplete: @escaping @MainActor (MTPSyncResult) -> Void
     ) async {
         onLog("Starting MTP sync to Garmin watch")
         let generation = UUID()
@@ -198,7 +198,7 @@ final class SyncSessionController {
                     deviceFiles: deviceBrowser.files
                 )
 
-                // Always execute so native playlist creation runs for skip-all cases.
+                // Always execute so native playlist create/update runs for skip-all cases.
                 try Task.checkCancellation()
                 let result = await syncCoordinator.executeMTPPlan(
                     plan,
@@ -218,13 +218,14 @@ final class SyncSessionController {
                     onLog("MTP sync complete: all \(result.skippedCount) selected track(s) already on the Garmin.")
                 } else if result.failedCount > 0 {
                     onLog("MTP sync partially complete: sent \(result.uploadedCount), skipped \(result.skippedCount), replaced \(result.replacedCount), \(result.failedCount) failed.")
+                    onLog("Use Retry Failed to re-send only the tracks that did not transfer.")
                 } else {
                     onLog("MTP sync complete: sent \(result.uploadedCount), skipped \(result.skippedCount), replaced \(result.replacedCount).")
                 }
                 if let playlistName = result.playlistName {
                     onLog("Playlist on Garmin: \(playlistName)")
                 }
-                onComplete()
+                onComplete(result)
             } catch is CancellationError {
                 onLog("MTP sync cancelled.")
             } catch {

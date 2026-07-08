@@ -3,17 +3,23 @@
 ## App layers
 
 - `App/` — SwiftUI app entry, `AppModel` orchestration, coordinators
-  - `SyncCoordinator` — mounted + MTP sync plans/execution
-  - `DeviceLibraryCoordinator` — browser configuration + legacy snapshot mapping
-  - `DeviceOperationsCoordinator` — upload/delete/move helpers
+  - `SyncSessionController` — preview + sync session façade over `SyncCoordinator`
+  - `SyncCoordinator` — mounted + MTP sync plans/execution, conversion prep
+  - `DeviceSessionController` — browse/upload/delete/move task lifecycle + device helpers
+  - `DeviceLibraryCoordinator` — browser configuration + duplicate detection
+  - `DeviceOperationsCoordinator` — pure helpers (upload builders, delete policy, paths)
   - `LibraryImportCoordinator` — Mac library import merge/scan helpers
   - `TransferLogStore` — capped transfer log
-- `Views/` — SwiftUI user interface
+- `Views/` — SwiftUI user interface (device UI reads `DeviceBrowserStore` directly)
 - `Models/` — devices, tracks, sync jobs, storage info
 - `Services/` — detection, scanning, sync, MTP client/transport, conversion
-- `Stores/` — `DeviceBrowserStore` for mounted-folder and MTP backends
+- `Stores/` — `DeviceBrowserStore` for mounted-folder and MTP backends (source of truth for device listings)
 - `Persistence/` — `SettingsStore` (`UserDefaults`)
 - `Utilities/` — formatters and filename sanitization
+
+`AppModel` remains the composition root and holds UI-published state. Long-running
+device work is owned by `DeviceSessionController` (tasks, MTP move originals,
+cancel). Sync work is owned by `SyncSessionController`.
 
 ## Core package (`GarminMusicCore`)
 
@@ -29,15 +35,19 @@ The app writes to a user-visible folder or syncs over MTP:
 - any test folder
 
 Sync creates a playlist subfolder and copies selected files there. Mounted
-folders optionally get an `.m3u8` playlist with relative `#EXTINF` paths.
+folders optionally get an `.m3u8` playlist with relative `#EXTINF` paths
+(including artist/album subfolders). MTP syncs optionally create a **native**
+device playlist (`LIBMTP_Create_New_Playlist`) from post-upload object IDs when
+`writePlaylist` is enabled — including the all-skip-identical case (playlist
+rebuild without re-transfer).
 
 ### Sync flow
 
 ```text
 User selects tracks → Sync Preview (dry-run)
   → SyncCoordinator copies/uploads (async, cancellable, chunked for MTP)
-  → M3UWriter generates .m3u8 (mounted folders)
-  → DeviceBrowserStore refreshes destination listing
+  → M3UWriter .m3u8 (mounted)  OR  createPlaylist via helper (MTP)
+  → DeviceBrowserStore refreshes destination listing (once; avoid double re-list)
 ```
 
 ### Overwrite policies
@@ -166,6 +176,17 @@ User Cancel → `Task.cancel` + `MTPHelperClient.cancelInFlightHelper()`:
 4. If still stuck after ~2.5s, transport escalates to SIGTERM/SIGKILL
 5. Client maps `cancelled` → `CancellationError` (no retry)
 
+## MTP readiness (brew-free packaged apps)
+
+`MTPDependencyStatus.isReady` is true when:
+
+1. `GarminMTPHelper` is findable (bundled in the `.app`, next to the binary, or under `.build/`), **and**
+2. libmtp is loadable either as **bundled** `Contents/Frameworks/libmtp*.dylib` **or** a system/Homebrew dylib
+
+Headers are a **build** dependency only and are not required at runtime. Packaged
+apps therefore work on machines without Homebrew. “Install MTP” is offered only
+when `canInstallViaHomebrew` is true (no bundled libmtp).
+
 ## Packaging
 
 `Scripts/package-app.sh` builds the `.app`, optionally bundles `libmtp`/`libusb`
@@ -173,9 +194,16 @@ into `Contents/Frameworks`, signs inside-out (dylibs → helper → app), and ca
 submit to Apple notarization when `NOTARIZE=1` + `CODESIGN_IDENTITY` +
 `NOTARY_PROFILE` are set.
 
+## P1 product behaviors
+
+- **Retry failed** — after a partial MTP transfer, failed track IDs are retained; UI/menu can re-select and preview only those tracks.
+- **Playlist update** — native MTP playlists with the same name are updated via `LIBMTP_Update_Playlist` instead of always creating a new one.
+- **USB auto-detect** — `DeviceConnectMonitor` watches volume mount/unmount and polls Garmin USB signatures every ~6s.
+- **Smarter duplicates** — `TrackMatching` uses name+size, title+artist+size, or title+duration+size.
+- **Queue restore** — Mac track queue paths/selection are saved to `UserDefaults` and restored on launch when files still exist.
+
 ## Remaining roadmap
 
 - **Metadata editor** — lightweight tag repair sheet
 - **Apple Music XML playlist import** — beyond `.m3u` / Music.app browser
 - **MTP move** — native in-place move when firmware supports it
-- **Update existing MTP playlists** — replace track list when name already exists

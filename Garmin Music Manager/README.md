@@ -62,11 +62,12 @@ swift run
 
 ## Settings
 
-Open **Garmin Music Manager → Settings** (⌘,) to configure:
+Open **Garmin Music Manager → Settings** (⌘,) to configure (saved automatically):
 
 - Overwrite policy (skip identical, replace, keep both)
 - Folder organization (flat, by artist, by artist/album)
-- M3U8 playlist generation
+- Write playlist after sync (`.m3u8` on folders; native playlist over MTP)
+- Optional ALAC/FLAC → AAC conversion (ffmpeg)
 
 ## Project structure
 
@@ -108,6 +109,18 @@ the helper’s install names so end users do not need Homebrew for MTP.
 
 ## Roadmap
 
-- Metadata editor
-- Playlist import from Apple Music XML or `.m3u`
+- Metadata editor (lightweight tag repair)
+- Apple Music XML playlist import (beyond `.m3u` / Music.app browser)
 - MTP native in-place move when firmware supports it
+- Update existing native MTP playlists when the name already exists (today each sync may create a new playlist)
+
+## Release checklist
+
+1. Set a real git author for this repo if commits still show a placeholder:
+   `git config user.name "…"` / `git config user.email "…"`
+2. Bump `VERSION` (semver) and tag: `git tag v$(cat VERSION)`
+3. `make app` or `make app-signed` — package is **arm64** on Apple Silicon hosts (CI uses `macos-latest`)
+4. Optional: `NOTARIZE=1` with Developer ID + notary profile for Gatekeeper distribution
+5. Add a git remote (`git remote add origin …`) before push — none is configured by default
+
+See also [Docs/Architecture.md](Docs/Architecture.md) for MTP design notes and development hygiene.

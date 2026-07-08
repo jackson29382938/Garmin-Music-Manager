@@ -6,6 +6,11 @@ import GarminMusicCore
 final class LibraryImportCoordinator {
     private let scanner = MusicScanner()
 
+    struct ImportExpansion {
+        var audioURLs: [URL]
+        var playlistsExpanded: Int
+    }
+
     func scanFiles(_ urls: [URL]) async -> [AudioTrack] {
         await scanner.scanFiles(urls)
     }
@@ -14,17 +19,14 @@ final class LibraryImportCoordinator {
         scanner.findAudioFiles(in: folder)
     }
 
-    func expandDroppedURLs(_ urls: [URL]) -> [URL] {
-        var fileURLs: [URL] = []
-        for url in urls {
-            var isDirectory: ObjCBool = false
-            if FileManager.default.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
-                fileURLs.append(contentsOf: scanner.findAudioFiles(in: url))
-            } else {
-                fileURLs.append(url)
-            }
-        }
-        return fileURLs
+    /// Expands folders and playlist files into concrete local audio URLs.
+    func expandImportURLs(_ urls: [URL]) -> ImportExpansion {
+        let result = scanner.expandImportURLs(urls)
+        return ImportExpansion(audioURLs: result.audioURLs, playlistsExpanded: result.playlistsExpanded)
+    }
+
+    func expandDroppedURLs(_ urls: [URL]) -> ImportExpansion {
+        expandImportURLs(urls)
     }
 
     func mergeTracks(existing: [AudioTrack], newTracks: [AudioTrack]) -> [AudioTrack] {

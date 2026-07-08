@@ -85,22 +85,27 @@ final class DeviceContentService {
         let syncFolder = destination.appendingPathComponent(cleanName, isDirectory: true)
         let deviceFiles = listAudioFiles(in: destination)
 
-        let index = Dictionary(
-            grouping: deviceFiles,
-            by: { "\($0.fileName.lowercased())|\($0.byteCount)" }
-        )
+        var fingerprintIndex = Set<String>()
+        for file in deviceFiles {
+            fingerprintIndex.insert("name|\(file.fileName.lowercased())|\(file.byteCount)")
+        }
+
+        // Also index files under the playlist subfolder by relative path presence.
+        var syncFolderNames = Set<String>()
+        if fileManager.fileExists(atPath: syncFolder.path) {
+            for file in listAudioFiles(in: syncFolder) {
+                syncFolderNames.insert(file.fileName.lowercased())
+                fingerprintIndex.insert("name|\(file.fileName.lowercased())|\(file.byteCount)")
+            }
+        }
 
         return tracks.map { track in
             var updated = track
-            let key = "\(FileNameSanitizer.safeFileName(for: track).lowercased())|\(track.byteCount)"
-            let altKey = "\(track.fileName.lowercased())|\(track.byteCount)"
-            updated.isDuplicateOnDevice = index[key] != nil || index[altKey] != nil
-            if updated.isDuplicateOnDevice && fileManager.fileExists(atPath: syncFolder.path) {
-                let inSyncFolder = syncFolder.appendingPathComponent(track.fileName)
-                if fileManager.fileExists(atPath: inSyncFolder.path) {
-                    updated.isDuplicateOnDevice = true
-                }
-            }
+            let fingerprints = TrackMatching.trackFingerprintKeys(for: track)
+            let byFingerprint = fingerprints.contains(where: { fingerprintIndex.contains($0) })
+            let bySyncFolder = syncFolderNames.contains(FileNameSanitizer.safeFileName(for: track).lowercased())
+                || syncFolderNames.contains(track.fileName.lowercased())
+            updated.isDuplicateOnDevice = byFingerprint || bySyncFolder
             return updated
         }
     }

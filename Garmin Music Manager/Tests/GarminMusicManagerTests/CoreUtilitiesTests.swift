@@ -1,5 +1,7 @@
 import XCTest
 @testable import GarminMusicCore
+@testable import GarminMusicManager
+@testable import GarminMusicManager
 
 final class PathSanitizerTests: XCTestCase {
     func testSanitizeFileNameRemovesInvalidCharacters() {
@@ -89,6 +91,28 @@ final class M3UImporterTests: XCTestCase {
 
         let urls = try M3UImporter.localTrackURLs(from: playlist)
         XCTAssertEqual(urls.map(\.lastPathComponent), ["local.mp3"])
+    }
+}
+
+final class MusicScannerExpansionTests: XCTestCase {
+    func testExpandImportURLsResolvesPlaylistAndSkipsPlaylistAsAudio() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let song = folder.appendingPathComponent("song.mp3")
+        FileManager.default.createFile(atPath: song.path, contents: Data([0x01]))
+        let playlist = folder.appendingPathComponent("list.m3u")
+        try "song.mp3\n".write(to: playlist, atomically: true, encoding: .utf8)
+
+        let scanner = MusicScanner()
+        let foundAudio = scanner.findAudioFiles(in: folder)
+        XCTAssertEqual(foundAudio.map(\.lastPathComponent), ["song.mp3"])
+        XCTAssertFalse(foundAudio.contains(where: { $0.pathExtension.lowercased() == "m3u" }))
+
+        let expanded = scanner.expandImportURLs([playlist])
+        XCTAssertEqual(expanded.playlistsExpanded, 1)
+        XCTAssertEqual(expanded.audioURLs.map(\.lastPathComponent), ["song.mp3"])
     }
 }
 

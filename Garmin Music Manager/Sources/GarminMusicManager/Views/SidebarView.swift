@@ -89,7 +89,9 @@ struct SidebarView: View {
 
     @ViewBuilder
     private var installMTPButton: some View {
-        if model.connectedUSBDevices.isEmpty == false, !model.mtpDependencyStatus.isReady {
+        if model.connectedUSBDevices.isEmpty == false,
+           !model.mtpDependencyStatus.isReady,
+           model.mtpDependencyStatus.canInstallViaHomebrew {
             Button(model.isInstallingMTPDependencies ? "Installing…" : "Install MTP") {
                 model.installMTPDependencies()
             }

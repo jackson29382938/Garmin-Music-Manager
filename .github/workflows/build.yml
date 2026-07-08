@@ -31,3 +31,15 @@ jobs:
 
       - name: Release build
         run: swift build -c release -v
+
+      - name: Package app smoke
+        run: |
+          ./Scripts/package-app.sh
+          test -x "dist/Garmin Music Manager.app/Contents/MacOS/GarminMusicManager"
+          test -x "dist/Garmin Music Manager.app/Contents/MacOS/GarminMTPHelper"
+          # Helper should link to bundled libmtp when Homebrew provided it.
+          if otool -L "dist/Garmin Music Manager.app/Contents/MacOS/GarminMTPHelper" | grep -q 'Frameworks/libmtp'; then
+            echo "Bundled libmtp linkage OK"
+          else
+            echo "warning: helper not linked to bundled libmtp (may need Homebrew at runtime)"
+          fi

@@ -157,6 +157,12 @@ final class SyncService {
               let size = (attrs[.size] as? NSNumber)?.int64Value else {
             return false
         }
-        return size == expectedSize
+        // Mounted path: same filename destination + size. Metadata matching
+        // for MTP uses TrackMatching; here the path already encodes identity.
+        return TrackMatching.sizesMatch(local: expectedSize, remote: size)
+            && TrackMatching.namesMatch(
+                localFileName: source.lastPathComponent,
+                remoteFileName: target.lastPathComponent
+            )
     }
 }

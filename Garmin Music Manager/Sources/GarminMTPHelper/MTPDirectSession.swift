@@ -415,50 +415,85 @@ final class MTPDirectSession {
             )
         }
 
-        try MTPRetryPolicy.runWithRetry {
-            try self.createPlaylistOnce(name: playlistName, trackIDs: trackIDs)
+        let action = try MTPRetryPolicy.runWithRetry {
+            try self.createOrUpdatePlaylistOnce(name: playlistName, trackIDs: trackIDs)
         }
 
+        let verb = action == .updated ? "Updated" : "Created"
         return DeviceFileOperationResult(
             completedCount: trackIDs.count,
             failedItems: failures,
-            message: "Created playlist “\(playlistName)” with \(trackIDs.count) track(s)."
+            message: "\(verb) playlist “\(playlistName)” with \(trackIDs.count) track(s)."
         )
     }
 
-    private func createPlaylistOnce(name: String, trackIDs: [UInt32]) throws {
+    private enum PlaylistWriteAction {
+        case created
+        case updated
+    }
+
+    private func createOrUpdatePlaylistOnce(name: String, trackIDs: [UInt32]) throws -> PlaylistWriteAction {
+        // Prefer updating an existing playlist with the same name so re-syncs
+        // do not pile up duplicate playlists on the watch.
+        if let existing = loadPlaylistRecords().first(where: {
+            $0.name.localizedCaseInsensitiveCompare(name) == .orderedSame
+        }) {
+            try writePlaylist(name: name, trackIDs: trackIDs, existingID: existing.id, update: true)
+            return .updated
+        }
+        try writePlaylist(name: name, trackIDs: trackIDs, existingID: 0, update: false)
+        return .created
+    }
+
+    private func writePlaylist(name: String, trackIDs: [UInt32], existingID: UInt32, update: Bool) throws {
+        // Ownership contract with libmtp (see LIBMTP_destroy_playlist_t):
+        // - name must be heap-allocated with strdup/malloc (freed via free())
+        // - tracks must be malloc'd (not Swift UnsafeMutablePointer.allocate)
+        // - Create/Update copy data to the device; they do not free the struct
+        // - destroy frees name + tracks + the playlist node itself (one node only)
         guard let playlist = LIBMTP_new_playlist_t() else {
             throw MTPHelperError(code: "playlist-failed", message: "Could not allocate MTP playlist metadata.")
         }
         defer { LIBMTP_destroy_playlist_t(playlist) }
 
-        playlist.pointee.playlist_id = 0
+        playlist.pointee.playlist_id = existingID
         playlist.pointee.parent_id = firstStorageMusicParentID()
         playlist.pointee.storage_id = firstStorageID()
         playlist.pointee.name = duplicatedCString(name)
         playlist.pointee.no_tracks = UInt32(trackIDs.count)
+        playlist.pointee.tracks = mallocTrackIDBuffer(trackIDs)
+        playlist.pointee.next = nil
 
-        let trackBuffer = UnsafeMutablePointer<UInt32>.allocate(capacity: trackIDs.count)
-        for (index, id) in trackIDs.enumerated() {
-            trackBuffer[index] = id
+        let result: Int32
+        if update {
+            result = LIBMTP_Update_Playlist(device, playlist)
+        } else {
+            result = LIBMTP_Create_New_Playlist(device, playlist)
         }
-        playlist.pointee.tracks = trackBuffer
-        // LIBMTP_destroy_playlist_t frees tracks; transfer ownership by not deallocating here.
-        // Actually destroy_playlist_t may free tracks — check: typically it frees the array.
-        // We must not deallocate trackBuffer ourselves if destroy owns it.
-        // libmtp destroy_playlist_t frees name and tracks.
-
-        let result = LIBMTP_Create_New_Playlist(device, playlist)
-        // After create, libmtp may have taken ownership; destroy still frees the struct fields.
         guard result == 0 else {
-            // If create failed, destroy will free trackBuffer via playlist.tracks.
             throw operationError(
                 code: "playlist-failed",
-                message: "Could not create the playlist \(name) on the Garmin.",
+                message: update
+                    ? "Could not update the playlist \(name) on the Garmin."
+                    : "Could not create the playlist \(name) on the Garmin.",
                 details: drainErrorStack()
             )
         }
-        // Success: destroy_playlist_t still needed for the local struct; Create may leave IDs filled.
+    }
+
+    /// Allocates a C-compatible `uint32_t` array via `malloc` so
+    /// `LIBMTP_destroy_playlist_t` can `free()` it safely.
+    private func mallocTrackIDBuffer(_ trackIDs: [UInt32]) -> UnsafeMutablePointer<UInt32>? {
+        guard !trackIDs.isEmpty else { return nil }
+        let byteCount = MemoryLayout<UInt32>.stride * trackIDs.count
+        guard let raw = malloc(byteCount) else {
+            return nil
+        }
+        let buffer = raw.assumingMemoryBound(to: UInt32.self)
+        for (index, id) in trackIDs.enumerated() {
+            buffer[index] = id
+        }
+        return buffer
     }
 
     /// Prefer Music folder as playlist parent when the device exposes one.
@@ -521,7 +556,8 @@ final class MTPDirectSession {
             _ = drainErrorStack()
             return []
         }
-        defer { LIBMTP_destroy_track_t(head) }
+        // destroy_track_t frees a single node; walk the whole list.
+        defer { destroyTrackList(head) }
 
         var records: [MTPTrackRecord] = []
         var current: UnsafeMutablePointer<LIBMTP_track_t>? = head
@@ -555,7 +591,8 @@ final class MTPDirectSession {
             _ = drainErrorStack()
             return []
         }
-        defer { LIBMTP_destroy_playlist_t(head) }
+        // destroy_playlist_t frees a single node (name + tracks + struct), not the chain.
+        defer { destroyPlaylistList(head) }
 
         var records: [MTPPlaylistRecord] = []
         var current: UnsafeMutablePointer<LIBMTP_playlist_t>? = head

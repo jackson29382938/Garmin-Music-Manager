@@ -56,7 +56,7 @@ struct SettingsView: View {
             Section {
                 Label(model.mtpDependencyStatus.message, systemImage: model.mtpDependencyStatus.isReady ? "checkmark.circle" : "exclamationmark.triangle")
                     .foregroundStyle(model.mtpDependencyStatus.isReady ? .green : .orange)
-                Text("The app uses the bundled Garmin helper for MTP browsing and file operations. Homebrew/libmtp is only installed when you choose Install MTP Support.")
+                Text("Packaged builds bundle the Garmin helper and libmtp (no Homebrew required). Install MTP only when running from source without a system libmtp.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } header: {
@@ -64,9 +64,9 @@ struct SettingsView: View {
             }
 
             Section {
-                Button("Save Settings") {
-                    model.saveSettings()
-                }
+                Text("Settings are saved automatically when you change them.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
 
             Section {

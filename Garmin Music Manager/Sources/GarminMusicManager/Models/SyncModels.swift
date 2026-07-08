@@ -15,10 +15,12 @@ struct MTPSyncResult {
     let failedCount: Int
     /// True when the owning Task was cancelled mid-transfer (remaining items not treated as failures).
     let wasCancelled: Bool
-    /// Native MTP playlist name when one was created successfully.
+    /// Native MTP playlist name when one was created or updated successfully.
     let playlistName: String?
     /// Remote paths (or display names) that failed to transfer.
     let failedItems: [String]
+    /// Stable track IDs for “Retry failed” (subset of the Mac library queue).
+    let failedTrackIDs: [UUID]
 
     init(
         uploadedCount: Int,
@@ -27,7 +29,8 @@ struct MTPSyncResult {
         failedCount: Int,
         wasCancelled: Bool = false,
         playlistName: String? = nil,
-        failedItems: [String] = []
+        failedItems: [String] = [],
+        failedTrackIDs: [UUID] = []
     ) {
         self.uploadedCount = uploadedCount
         self.skippedCount = skippedCount
@@ -36,7 +39,10 @@ struct MTPSyncResult {
         self.wasCancelled = wasCancelled
         self.playlistName = playlistName
         self.failedItems = failedItems
+        self.failedTrackIDs = failedTrackIDs
     }
+
+    var canRetryFailed: Bool { !failedTrackIDs.isEmpty }
 }
 
 /// Result of preparing tracks for sync (optional ALAC/FLAC → AAC conversion).

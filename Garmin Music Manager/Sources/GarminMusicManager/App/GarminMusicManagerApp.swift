@@ -13,10 +13,39 @@ struct GarminMusicManagerApp: App {
         }
         .commands {
             CommandGroup(after: .newItem) {
+                Button("Add Files…") {
+                    appModel.chooseMusicFiles()
+                }
+                .keyboardShortcut("o", modifiers: [.command])
+
+                Button("Add Folder…") {
+                    appModel.chooseMusicFolder()
+                }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
+
+                Button("Import M3U Playlist…") {
+                    appModel.chooseM3UPlaylist()
+                }
+
+                Button("Apple Music Library…") {
+                    appModel.openAppleMusicBrowser()
+                }
+
+                Divider()
+
                 Button("Refresh Garmin Devices") {
                     appModel.refreshDevices()
                 }
                 .keyboardShortcut("r", modifiers: [.command])
+
+                Button("Browse Garmin Library") {
+                    appModel.browseGarminMusicLibrary()
+                }
+                .disabled(!appModel.hasMTPDestination || !appModel.mtpDependencyStatus.isReady)
+
+                Button("Choose Destination Folder…") {
+                    appModel.chooseCustomGarminFolder()
+                }
 
                 Divider()
 
@@ -30,6 +59,21 @@ struct GarminMusicManagerApp: App {
                     appModel.uploadSelectedTracksToDevice()
                 }
                 .disabled(!appModel.canUploadSelectedTracksToDevice)
+
+                Button("Retry Failed Transfers") {
+                    appModel.retryFailedTransfers()
+                }
+                .disabled(!appModel.canRetryFailedTransfers)
+
+                Button("Cancel Transfer") {
+                    if appModel.isSyncing {
+                        appModel.cancelSync()
+                    } else {
+                        appModel.cancelDeviceOperation()
+                    }
+                }
+                .keyboardShortcut(".", modifiers: [.command])
+                .disabled(!appModel.isSyncing && !appModel.isManagingDeviceFiles && !appModel.isBrowsingDevice)
             }
         }
         .defaultSize(width: 1180, height: 780)

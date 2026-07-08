@@ -60,23 +60,20 @@ final class AppModel: ObservableObject {
     @Published var isBrowsingDevice = false
     @Published var connectedMTPDeviceName: String?
     @Published var deviceBrowser = DeviceBrowserStore()
+    /// Track IDs from the last MTP transfer that failed (for Retry Failed).
+    @Published private(set) var lastFailedTrackIDs: Set<UUID> = []
 
-    private var browseTask: Task<Void, Never>?
-    private var deviceFileTask: Task<Void, Never>?
-    private var pendingMTPMoveOriginals: [DeviceFile] = []
     private let detector = DeviceDetector()
-    private let scanner = MusicScanner()
     private let syncSession = SyncSessionController()
-    private let deviceLibraryCoordinator = DeviceLibraryCoordinator()
-    private let deviceOperationsCoordinator = DeviceOperationsCoordinator()
-    private let libraryImportCoordinator = LibraryImportCoordinator()
+    private let deviceSession = DeviceSessionController()
+    private let macLibrarySession = MacLibrarySession()
     private let mtpDependencyManager = MTPDependencyManager()
-    private let contentService = DeviceContentService()
-    private let appleMusic = AppleMusicLibrary()
     private let transferLogStore = TransferLogStore()
     private let settingsStore: SettingsStore
     private var deviceBrowserCancellable: AnyCancellable?
     private var transferLogCancellable: AnyCancellable?
+    private var tracksPersistCancellable: AnyCancellable?
+    private var connectMonitor: DeviceConnectMonitor?
 
     /// True when the device browser has loaded any MTP listing (files or collections).
     var isMTPLibraryLoaded: Bool {
@@ -113,31 +110,42 @@ final class AppModel: ObservableObject {
         }
         self.mtpDependencyStatus = mtpDependencyManager.dependencyStatus()
         self.settingsReady = true
+        self.tracksPersistCancellable = $tracks
+            .dropFirst()
+            .debounce(for: .seconds(1.2), scheduler: RunLoop.main)
+            .sink { [weak self] tracks in
+                self?.macLibrarySession.saveQueue(tracks)
+            }
         if autoRefresh {
             if let destination = destinationOverride {
                 refreshDeviceContents(at: destination)
             }
             Task { refreshDevices() }
+            Task { await self.restoreLibraryQueueIfNeeded() }
+            let monitor = DeviceConnectMonitor { [weak self] in
+                self?.refreshDevices()
+            }
+            monitor.start()
+            self.connectMonitor = monitor
         }
+    }
+
+    var canRetryFailedTransfers: Bool {
+        !isSyncing
+            && !lastFailedTrackIDs.isEmpty
+            && tracks.contains { lastFailedTrackIDs.contains($0.id) && $0.compatibility.canCopy }
     }
 
     var syncableTracks: [AudioTrack] {
-        tracks.filter { $0.compatibility.canCopy && $0.isSelected }
+        macLibrarySession.syncableTracks(from: tracks)
     }
 
     var blockedTracks: [AudioTrack] {
-        tracks.filter { !$0.compatibility.canCopy }
+        macLibrarySession.blockedTracks(from: tracks)
     }
 
     var filteredTracks: [AudioTrack] {
-        guard !searchText.isEmpty else { return tracks }
-        let query = searchText.lowercased()
-        return tracks.filter {
-            $0.displayName.lowercased().contains(query)
-                || $0.fileName.lowercased().contains(query)
-                || ($0.artist?.lowercased().contains(query) ?? false)
-                || ($0.album?.lowercased().contains(query) ?? false)
-        }
+        macLibrarySession.filteredTracks(from: tracks, searchText: searchText)
     }
 
     var activeDestination: URL? {
@@ -198,14 +206,7 @@ final class AppModel: ObservableObject {
     }
 
     var macLibraryLocationDescription: String {
-        if tracks.isEmpty {
-            return "No Mac music loaded"
-        }
-        let folders = Set(tracks.map { $0.url.deletingLastPathComponent().path })
-        if folders.count == 1, let folder = folders.first {
-            return folder
-        }
-        return "\(folders.count) Mac folders"
+        macLibrarySession.macLibraryLocationDescription(for: tracks)
     }
 
     var garminLibraryLocationDescription: String {
@@ -543,7 +544,26 @@ final class AppModel: ObservableObject {
 
     func clearTracks() {
         tracks.removeAll()
+        lastFailedTrackIDs = []
+        libraryQueueStore.clear()
         appendLog("Cleared all tracks.")
+    }
+
+    private func restoreLibraryQueueIfNeeded() async {
+        let restored = libraryQueueStore.restoreExisting()
+        guard !restored.urls.isEmpty else { return }
+        isScanning = true
+        defer { isScanning = false }
+        var scanned = await scanner.scanFiles(restored.urls)
+        for index in scanned.indices {
+            let path = scanned[index].url.standardizedFileURL.path
+            if let selected = restored.selection[path] {
+                scanned[index].isSelected = selected && scanned[index].compatibility.canCopy
+            }
+        }
+        tracks = scanned
+        updateDuplicateFlags()
+        appendLog("Restored \(scanned.count) track(s) from the previous session.")
     }
 
     func selectAllReady() {
@@ -567,22 +587,23 @@ final class AppModel: ObservableObject {
             deviceBrowser.clear(message: "Connect a Garmin over USB or choose a destination folder to browse existing audio files.")
             return
         }
-        configureMountedBrowser(destination: destination, displayName: selectedDevice?.volumeName ?? destination.lastPathComponent)
-        Task {
-            await deviceBrowser.refresh(force: true)
-            updateDuplicateFlags()
-        }
+        deviceSession.refreshMountedContents(
+            deviceBrowser: deviceBrowser,
+            destination: destination,
+            displayName: selectedDevice?.volumeName ?? destination.lastPathComponent,
+            advancedStorageExplorerEnabled: advancedStorageExplorerEnabled,
+            onFinished: { [weak self] in self?.updateDuplicateFlags() }
+        )
     }
 
     func updateDuplicateFlags() {
-        tracks = deviceLibraryCoordinator.updateDuplicateFlags(
+        tracks = deviceSession.updateDuplicateFlags(
             tracks: tracks,
             deviceBrowser: deviceBrowser,
             activeDestination: activeDestination,
             isMTPLibraryMode: isMTPLibraryMode,
             playlistName: playlistName,
-            syncSettings: syncSettings,
-            contentService: contentService
+            syncSettings: syncSettings
         )
     }
 
@@ -626,11 +647,7 @@ final class AppModel: ObservableObject {
     /// copy, delete, move). Over MTP this asks the helper to abort the current
     /// libmtp transfer (SIGUSR1), escalating to process kill if needed.
     func cancelDeviceOperation() {
-        browseTask?.cancel()
-        browseTask = nil
-        deviceFileTask?.cancel()
-        deviceFileTask = nil
-        Task { await MTPHelperClient.cancelInFlightHelper() }
+        deviceSession.cancelInFlight()
         appendLog("Device operation cancelled.")
     }
 
@@ -666,12 +683,29 @@ final class AppModel: ObservableObject {
                 self?.appendLog(message)
             },
             onMountedComplete: { [weak self] destination in
+                self?.lastFailedTrackIDs = []
                 self?.refreshDeviceContents(at: destination)
             },
-            onMTPComplete: { [weak self] in
+            onMTPComplete: { [weak self] result in
+                self?.lastFailedTrackIDs = Set(result.failedTrackIDs)
                 self?.applyPostMTPTransferUI(forceLibraryRefresh: false)
             }
         )
+    }
+
+    /// Re-selects only tracks that failed the last MTP transfer and starts a new sync.
+    func retryFailedTransfers() {
+        guard canRetryFailedTransfers else {
+            appendLog("Nothing to retry.")
+            return
+        }
+        let retryIDs = lastFailedTrackIDs
+        for index in tracks.indices {
+            tracks[index].isSelected = retryIDs.contains(tracks[index].id) && tracks[index].compatibility.canCopy
+        }
+        let count = tracks.filter(\.isSelected).count
+        appendLog("Retrying \(count) failed track(s)…")
+        prepareSyncPreview()
     }
 
     func installMTPDependencies() {
@@ -698,26 +732,22 @@ final class AppModel: ObservableObject {
     }
 
     func deleteSelectedDeviceFiles() {
-        let files = selectedDeviceFiles
-        guard !files.isEmpty else { return }
-
-        isManagingDeviceFiles = true
-        deviceFileTask = Task {
-            defer { isManagingDeviceFiles = false }
-            let result = await deviceBrowser.deleteSelected()
-            if let result {
-                appendLog(result.message ?? "Deleted \(result.completedCount) file(s).")
-            } else if let error = deviceBrowser.lastError {
-                appendLog("Delete failed: \(error)")
-            }
-            updateDuplicateFlags()
-        }
+        deviceSession.deleteSelected(
+            deviceBrowser: deviceBrowser,
+            setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
+            onFinished: { [weak self] in self?.updateDuplicateFlags() },
+            log: { [weak self] message in self?.appendLog(message) }
+        )
     }
 
     func requestDeleteSelectedDeviceFiles() {
         let files = selectedDeviceFiles
         guard !files.isEmpty else { return }
-        if shouldConfirmDelete(files: files) {
+        if deviceSession.shouldConfirmDelete(
+            files: files,
+            browseMode: deviceBrowser.browseMode,
+            mode: destructiveConfirmationMode
+        ) {
             showDeleteConfirmation = true
         } else {
             deleteSelectedDeviceFiles()
@@ -725,28 +755,11 @@ final class AppModel: ObservableObject {
     }
 
     func copySelectedDeviceFilesToMac() {
-        let files = selectedDeviceFiles
-        guard !files.isEmpty else { return }
-
-        let panel = NSOpenPanel()
-        panel.title = "Choose where to copy Garmin files"
-        panel.message = "Select a folder on this Mac."
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
-
-        isManagingDeviceFiles = true
-        deviceFileTask = Task {
-            defer { isManagingDeviceFiles = false }
-            let result = await deviceBrowser.copySelected(to: destination)
-            if let result {
-                appendLog(result.message ?? "Copied \(result.completedCount) file(s) to \(destination.path).")
-            } else if let error = deviceBrowser.lastError {
-                appendLog("Copy failed: \(error)")
-            }
-        }
+        deviceSession.copySelectedToMac(
+            deviceBrowser: deviceBrowser,
+            setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
+            log: { [weak self] message in self?.appendLog(message) }
+        )
     }
 
     func startMoveSelectedWithinGarmin() {
@@ -761,71 +774,42 @@ final class AppModel: ObservableObject {
     }
 
     func moveSelectedWithinGarmin(to path: String) {
-        let files = selectedDeviceFiles.filter { $0.type != .folder }
-        guard !files.isEmpty else { return }
-
-        let target = GarminFolderTarget(normalizedMoveTargetPath(path), defaultingTo: defaultMoveTargetPath())
         showMoveWithinGarminSheet = false
-        moveTargetPath = target.storagePath
-
-        isManagingDeviceFiles = true
-        deviceFileTask = Task {
-            defer { isManagingDeviceFiles = false }
-            let result: DeviceFileOperationResult?
-            if deviceBrowser.backendKind == .mtp {
-                result = await deviceBrowser.copySelectedWithinMTP(to: target)
-                if let result, result.completedCount > 0 {
-                    let failedNames = Set(result.failedItems)
-                    pendingMTPMoveOriginals = files.filter { !failedNames.contains($0.name) }
-                    showMTPMoveDeleteConfirmation = !pendingMTPMoveOriginals.isEmpty
-                }
-            } else if let activeDestination {
-                result = await deviceBrowser.moveSelected(to: target.destinationURL(relativeTo: activeDestination))
-            } else {
-                appendLog("Choose or connect a Garmin destination before moving files.")
-                result = nil
-            }
-
-            if let result {
-                appendLog(result.message ?? "Moved \(result.completedCount) file(s) within Garmin.")
-            } else if let error = deviceBrowser.lastError {
-                appendLog("Move failed: \(error)")
-            }
-            updateDuplicateFlags()
-        }
+        moveTargetPath = deviceSession.moveSelectedWithinGarmin(
+            deviceBrowser: deviceBrowser,
+            path: path,
+            playlistName: playlistName,
+            activeDestination: activeDestination,
+            setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
+            setShowMTPMoveDeleteConfirmation: { [weak self] value in self?.showMTPMoveDeleteConfirmation = value },
+            onFinished: { [weak self] in self?.updateDuplicateFlags() },
+            log: { [weak self] message in self?.appendLog(message) }
+        )
     }
 
     func confirmDeleteOriginalsAfterMTPMove() {
-        let originals = pendingMTPMoveOriginals
-        pendingMTPMoveOriginals = []
-        showMTPMoveDeleteConfirmation = false
-        guard !originals.isEmpty else { return }
-
-        isManagingDeviceFiles = true
-        deviceFileTask = Task {
-            defer { isManagingDeviceFiles = false }
-            let result = await deviceBrowser.delete(originals)
-            if let result {
-                appendLog(result.message ?? "Deleted \(result.completedCount) original file(s) after MTP move.")
-            } else if let error = deviceBrowser.lastError {
-                appendLog("Could not delete original files after MTP move: \(error)")
-            }
-            updateDuplicateFlags()
-        }
+        deviceSession.confirmDeleteOriginalsAfterMTPMove(
+            deviceBrowser: deviceBrowser,
+            setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
+            setShowConfirmation: { [weak self] value in self?.showMTPMoveDeleteConfirmation = value },
+            onFinished: { [weak self] in self?.updateDuplicateFlags() },
+            log: { [weak self] message in self?.appendLog(message) }
+        )
     }
 
     func cancelDeleteOriginalsAfterMTPMove() {
-        pendingMTPMoveOriginals = []
-        showMTPMoveDeleteConfirmation = false
-        appendLog("Kept original files after copying within Garmin.")
+        deviceSession.cancelDeleteOriginalsAfterMTPMove(
+            setShowConfirmation: { [weak self] value in self?.showMTPMoveDeleteConfirmation = value },
+            log: { [weak self] message in self?.appendLog(message) }
+        )
     }
 
     func defaultMoveTargetPath() -> String {
-        deviceOperationsCoordinator.defaultMoveTargetPath(playlistName: playlistName)
+        deviceSession.defaultMoveTargetPath(playlistName: playlistName)
     }
 
     func normalizedMoveTargetPath(_ path: String) -> String {
-        deviceOperationsCoordinator.normalizedMoveTargetPath(path, playlistName: playlistName)
+        deviceSession.normalizedMoveTargetPath(path, playlistName: playlistName)
     }
 
     var isMTPLibraryMode: Bool {
@@ -839,113 +823,69 @@ final class AppModel: ObservableObject {
     /// "On Device" panel. macOS will not mount the watch as a folder, so this is
     /// the only way to surface the existing library.
     func browseGarminMusicLibrary(force: Bool = true) {
-        guard !isBrowsingDevice, !isManagingDeviceFiles else { return }
-        guard hasMTPDestination else {
-            deviceBrowseMessage = "No Garmin MTP device is connected. Connect the watch over USB and refresh."
-            deviceBrowser.statusMessage = deviceBrowseMessage
-            appendLog(deviceBrowseMessage ?? "No Garmin MTP device is connected.")
-            return
-        }
-        guard mtpDependencyStatus.isReady else {
-            deviceBrowseMessage = mtpDependencyStatus.message
-            deviceBrowser.statusMessage = mtpDependencyStatus.message
-            appendLog(mtpDependencyStatus.message)
-            return
-        }
-
-        browseTask?.cancel()
-        configureMTPBrowser()
-        isBrowsingDevice = true
-        if force {
-            appendLog("Loading Garmin music library over MTP…")
-        }
-        browseTask = Task {
-            defer {
-                isBrowsingDevice = false
-                browseTask = nil
-            }
-            await deviceBrowser.refresh(force: force)
-            guard !Task.isCancelled else { return }
-            applyPostMTPTransferUI(forceLibraryRefresh: false, logSummary: force)
-        }
+        deviceSession.browseMTPLibrary(
+            deviceBrowser: deviceBrowser,
+            force: force,
+            hasMTPDestination: hasMTPDestination,
+            mtpReady: mtpDependencyStatus.isReady,
+            mtpMessage: mtpDependencyStatus.message,
+            connectedUSBDevices: connectedUSBDevices,
+            connectedMTPDeviceName: connectedMTPDeviceName,
+            advancedStorageExplorerEnabled: advancedStorageExplorerEnabled,
+            isBrowsingDevice: isBrowsingDevice,
+            isManagingDeviceFiles: isManagingDeviceFiles,
+            setBrowsing: { [weak self] value in self?.isBrowsingDevice = value },
+            setConnectedMTPDeviceName: { [weak self] value in self?.connectedMTPDeviceName = value },
+            onDuplicates: { [weak self] in self?.updateDuplicateFlags() },
+            log: { [weak self] message in self?.appendLog(message) }
+        )
     }
 
-    /// Updates legacy device snapshot + duplicate flags after an MTP transfer
-    /// without necessarily re-listing the watch.
+    /// Updates duplicate flags / connected name after an MTP transfer without a full re-list.
     private func applyPostMTPTransferUI(forceLibraryRefresh: Bool, logSummary: Bool = true) {
         if forceLibraryRefresh {
             browseGarminMusicLibrary(force: true)
             return
         }
-        if let deviceName = deviceBrowser.deviceName {
-            connectedMTPDeviceName = deviceName
-        }
-        updateDuplicateFlags()
-        guard logSummary else { return }
-        let playlistCount = deviceBrowser.collections.filter { $0.kind == .playlist }.count
-        let playlistSummary = playlistCount == 0 ? "no playlists" : "\(playlistCount) playlist(s)"
-        appendLog("Garmin library: \(deviceBrowser.files.filter { $0.type == .audio }.count) audio file(s), \(playlistSummary).")
-        if let error = deviceBrowser.lastError {
-            appendLog("Could not read Garmin library: \(error)")
-        } else if let diagnosticMessage = deviceBrowser.statusMessage {
-            appendLog(diagnosticMessage)
-        }
+        deviceSession.applyPostTransferUI(
+            deviceBrowser: deviceBrowser,
+            logSummary: logSummary,
+            setConnectedMTPDeviceName: { [weak self] value in self?.connectedMTPDeviceName = value },
+            onDuplicates: { [weak self] in self?.updateDuplicateFlags() },
+            log: { [weak self] message in self?.appendLog(message) }
+        )
     }
 
     func switchDeviceBrowseMode(to mode: DeviceBrowseMode) {
-        deviceBrowser.setBrowseMode(mode, advancedEnabled: advancedStorageExplorerEnabled)
-        settingsStore.lastDeviceBrowseMode = deviceBrowser.browseMode
-        browseTask = Task {
-            await deviceBrowser.refresh(force: false)
-            guard !Task.isCancelled else { return }
-            updateDuplicateFlags()
-        }
+        deviceSession.switchBrowseMode(
+            deviceBrowser: deviceBrowser,
+            mode: mode,
+            advancedEnabled: advancedStorageExplorerEnabled,
+            onBrowseModePersisted: { [weak self] browseMode in
+                self?.settingsStore.lastDeviceBrowseMode = browseMode
+            },
+            onFinished: { [weak self] in self?.updateDuplicateFlags() }
+        )
     }
 
     func chooseFilesToUploadToDevice() {
-        guard deviceBrowser.isConfigured else {
-            appendLog("Choose or connect a Garmin destination first.")
-            return
-        }
-
-        let panel = NSOpenPanel()
-        panel.title = "Choose music files to add to Garmin"
-        panel.allowsMultipleSelection = true
-        panel.canChooseDirectories = false
-        panel.canChooseFiles = true
-        panel.allowedContentTypes = MusicScanner.supportedPickerTypes
-
-        guard panel.runModal() == .OK else { return }
-        uploadFilesToDevice(panel.urls)
+        deviceSession.chooseAndUploadFiles(
+            deviceBrowser: deviceBrowser,
+            setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
+            onFinished: { [weak self] in self?.updateDuplicateFlags() },
+            log: { [weak self] message in self?.appendLog(message) }
+        )
     }
 
     func uploadFilesToDevice(_ urls: [URL]) {
-        let audioURLs = deviceOperationsCoordinator.expandAudioURLs(urls)
-        guard !audioURLs.isEmpty else {
-            appendLog("No compatible music files were selected.")
-            return
-        }
         guard prepareDeviceBrowserForUpload() else { return }
-        guard deviceBrowser.browseMode == .musicOnly else {
-            appendLog("Switch the Garmin browser back to Music before adding tracks.")
-            return
-        }
-
-        isManagingDeviceFiles = true
-        let uploadFiles = deviceOperationsCoordinator.makeUploadFiles(
-            urls: audioURLs,
-            backendKind: deviceBrowser.backendKind
+        deviceSession.uploadFiles(
+            urls,
+            deviceBrowser: deviceBrowser,
+            setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
+            onFinished: { [weak self] in self?.updateDuplicateFlags() },
+            log: { [weak self] message in self?.appendLog(message) }
         )
-        deviceFileTask = Task {
-            defer { isManagingDeviceFiles = false }
-            let result = await deviceBrowser.upload(uploadFiles)
-            if let result {
-                appendLog(result.message ?? "Uploaded \(result.completedCount) file(s) to Garmin.")
-            } else if let error = deviceBrowser.lastError {
-                appendLog("Upload failed: \(error)")
-            }
-            updateDuplicateFlags()
-        }
     }
 
     func uploadSelectedTracksToDevice() {
@@ -954,64 +894,22 @@ final class AppModel: ObservableObject {
             return
         }
         guard prepareDeviceBrowserForUpload() else { return }
-        guard deviceBrowser.browseMode == .musicOnly else {
-            appendLog("Switch the Garmin browser back to Music before adding tracks.")
-            return
-        }
 
-        isManagingDeviceFiles = true
         let preparation = syncSession.prepareTracks(syncableTracks, settings: syncSettings)
         logTrackPreparation(preparation)
-        deviceFileTask = Task {
-            defer { isManagingDeviceFiles = false }
-
-            if deviceBrowser.backendKind == .mtp {
-                await deviceBrowser.refresh(force: true)
-                let plan = MTPSyncPlanner.buildPlan(
-                    tracks: preparation.tracks,
-                    playlistName: playlistName,
-                    settings: syncSettings,
-                    deviceFiles: deviceBrowser.files
-                )
-                // Run executor even when transferCount == 0 so playlist rebuild still happens.
-                let result = await syncSession.executeMTPPlan(
-                    plan,
-                    deviceBrowser: deviceBrowser,
-                    playlistName: playlistName,
-                    settings: syncSettings,
-                    refreshAfter: true
-                ) { [weak self] _, message in
-                    Task { @MainActor in
-                        if let message { self?.appendLog(message) }
-                    }
-                }
-                if result.wasCancelled {
-                    appendLog("Send cancelled after \(result.uploadedCount) track(s).")
-                } else if plan.transferCount == 0 {
-                    appendLog("All selected track(s) are already on the Garmin.")
-                } else if result.failedCount > 0 {
-                    appendLog("Sent \(result.uploadedCount) track(s); skipped \(result.skippedCount); \(result.failedCount) failed.")
-                } else {
-                    appendLog("Sent \(result.uploadedCount) track(s) to Garmin. Skipped \(result.skippedCount) identical file(s).")
-                }
-                if let playlistName = result.playlistName {
-                    appendLog("Playlist on Garmin: \(playlistName)")
-                }
-            } else {
-                let uploadFiles = deviceOperationsCoordinator.makeUploadFiles(
-                    tracks: preparation.tracks,
-                    playlistName: playlistName,
-                    settings: syncSettings,
-                    backendKind: deviceBrowser.backendKind
-                )
-                if let result = await deviceBrowser.upload(uploadFiles) {
-                    appendLog(result.message ?? "Sent \(result.completedCount) selected track(s) to Garmin.")
-                } else if let error = deviceBrowser.lastError {
-                    appendLog("Send to Garmin failed: \(error)")
-                }
-            }
-            updateDuplicateFlags()
-        }
+        deviceSession.uploadPreparedTracks(
+            preparation: preparation,
+            deviceBrowser: deviceBrowser,
+            playlistName: playlistName,
+            settings: syncSettings,
+            syncSession: syncSession,
+            setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
+            onFinished: { [weak self] in self?.updateDuplicateFlags() },
+            onMTPResult: { [weak self] result in
+                self?.lastFailedTrackIDs = Set(result.failedTrackIDs)
+            },
+            log: { [weak self] message in self?.appendLog(message) }
+        )
     }
 
     func openAppleMusicBrowser() {
@@ -1086,10 +984,7 @@ final class AppModel: ObservableObject {
 
     func resetAppState() {
         syncSession.cancel()
-        browseTask?.cancel()
-        browseTask = nil
-        deviceFileTask?.cancel()
-        deviceFileTask = nil
+        deviceSession.reset()
         isSyncing = false
         isScanning = false
         isManagingDeviceFiles = false
@@ -1098,6 +993,8 @@ final class AppModel: ObservableObject {
         syncPreview = nil
         searchText = ""
         tracks.removeAll()
+        lastFailedTrackIDs = []
+        libraryQueueStore.clear()
         musicLibrary = .empty
         musicLibraryStatus = .idle
         showAppleMusicBrowser = false
@@ -1107,7 +1004,6 @@ final class AppModel: ObservableObject {
         selectedDevice = nil
         connectedMTPDeviceName = nil
         moveTargetPath = ""
-        pendingMTPMoveOriginals.removeAll()
         showMoveWithinGarminSheet = false
         showMTPMoveDeleteConfirmation = false
         destinationMode = .autoDetected
@@ -1178,7 +1074,7 @@ final class AppModel: ObservableObject {
     }
 
     private func configureMountedBrowser(destination: URL, displayName: String) {
-        deviceLibraryCoordinator.configureMountedBrowser(
+        deviceSession.configureMountedBrowser(
             deviceBrowser: deviceBrowser,
             destination: destination,
             displayName: displayName,
@@ -1187,7 +1083,7 @@ final class AppModel: ObservableObject {
     }
 
     private func configureMTPBrowser() {
-        deviceLibraryCoordinator.configureMTPBrowser(
+        deviceSession.configureMTPBrowser(
             deviceBrowser: deviceBrowser,
             connectedUSBDevices: connectedUSBDevices,
             connectedMTPDeviceName: connectedMTPDeviceName,
@@ -1196,7 +1092,7 @@ final class AppModel: ObservableObject {
     }
 
     private func prepareDeviceBrowserForUpload() -> Bool {
-        deviceOperationsCoordinator.prepareDeviceBrowserForUpload(
+        deviceSession.prepareDeviceBrowserForUpload(
             deviceBrowser: deviceBrowser,
             activeDestination: activeDestination,
             selectedDeviceName: selectedDevice?.volumeName,
@@ -1206,15 +1102,6 @@ final class AppModel: ObservableObject {
             connectedMTPDeviceName: connectedMTPDeviceName,
             advancedStorageExplorerEnabled: advancedStorageExplorerEnabled,
             log: { [weak self] message in self?.appendLog(message) }
-        )
-    }
-
-
-    private func shouldConfirmDelete(files: [DeviceFile]) -> Bool {
-        deviceOperationsCoordinator.shouldConfirmDelete(
-            files: files,
-            browseMode: deviceBrowser.browseMode,
-            mode: destructiveConfirmationMode
         )
     }
 }

@@ -19,35 +19,84 @@ final class MusicScanner {
 
     static var supportedPickerTypes: [UTType] {
         var types: [UTType] = [.audio, .mp3, .mpeg4Audio, .wav]
-        for ext in ["aac", "adts", "m4b", "m3u", "m3u8"] {
+        for ext in ["aac", "adts", "m4b"] {
             if let type = UTType(filenameExtension: ext) { types.append(type) }
         }
         return types
     }
 
+    static var supportedPlaylistPickerTypes: [UTType] {
+        ["m3u", "m3u8"].compactMap { UTType(filenameExtension: $0) }
+    }
+
     private let fileManager = FileManager.default
 
+    /// Audio and known-unsupported audio-like files under a folder (not playlist files).
     func findAudioFiles(in folder: URL) -> [URL] {
-        let keys: [URLResourceKey] = [.isRegularFileKey]
-        guard let enumerator = fileManager.enumerator(
-            at: folder,
-            includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else { return [] }
-
-        return enumerator.compactMap { item in
-            guard let url = item as? URL else { return nil }
-            let ext = url.pathExtension.lowercased()
-            guard Self.supportedAudioExtensions.contains(ext)
-                || Self.supportedPlaylistExtensions.contains(ext)
-                || Self.knownUnsupportedExtensions.contains(ext) else { return nil }
-            return url
+        enumerateFiles(in: folder) { ext in
+            Self.supportedAudioExtensions.contains(ext)
+                || Self.knownUnsupportedExtensions.contains(ext)
         }
     }
 
+    /// Playlist files under a folder (`.m3u`, `.m3u8`, etc.).
+    func findPlaylistFiles(in folder: URL) -> [URL] {
+        enumerateFiles(in: folder) { ext in
+            Self.supportedPlaylistExtensions.contains(ext)
+        }
+    }
+
+    /// Expands folders into audio files and resolves local tracks from playlist files.
+    /// - Returns audio URLs ready for `scanFiles`, plus how many playlist files were expanded.
+    func expandImportURLs(_ urls: [URL]) -> (audioURLs: [URL], playlistsExpanded: Int) {
+        var audioURLs: [URL] = []
+        var playlistsExpanded = 0
+        var seen = Set<String>()
+
+        func appendAudio(_ url: URL) {
+            let key = url.standardizedFileURL.path
+            guard !seen.contains(key) else { return }
+            seen.insert(key)
+            audioURLs.append(url.standardizedFileURL)
+        }
+
+        for url in urls {
+            var isDirectory: ObjCBool = false
+            if fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
+                for audio in findAudioFiles(in: url) {
+                    appendAudio(audio)
+                }
+                for playlist in findPlaylistFiles(in: url) {
+                    playlistsExpanded += 1
+                    if let tracks = try? M3UImporter.localTrackURLs(from: playlist) {
+                        tracks.forEach(appendAudio)
+                    }
+                }
+                continue
+            }
+
+            let ext = url.pathExtension.lowercased()
+            if Self.supportedPlaylistExtensions.contains(ext) {
+                playlistsExpanded += 1
+                if let tracks = try? M3UImporter.localTrackURLs(from: url) {
+                    tracks.forEach(appendAudio)
+                }
+                continue
+            }
+
+            appendAudio(url)
+        }
+
+        return (audioURLs, playlistsExpanded)
+    }
+
     func scanFiles(_ urls: [URL]) async -> [AudioTrack] {
-        await withTaskGroup(of: (Int, AudioTrack).self) { group in
-            for (index, url) in urls.enumerated() {
+        // Never treat playlist files as audio assets.
+        let audioOnly = urls.filter { url in
+            !Self.supportedPlaylistExtensions.contains(url.pathExtension.lowercased())
+        }
+        return await withTaskGroup(of: (Int, AudioTrack).self) { group in
+            for (index, url) in audioOnly.enumerated() {
                 group.addTask {
                     let track = await self.scanFile(url)
                     return (index, track)
@@ -55,7 +104,7 @@ final class MusicScanner {
             }
 
             var indexed: [(Int, AudioTrack)] = []
-            indexed.reserveCapacity(urls.count)
+            indexed.reserveCapacity(audioOnly.count)
             for await result in group {
                 indexed.append(result)
             }
@@ -96,6 +145,22 @@ final class MusicScanner {
             compatibility: compatibility,
             isSelected: compatibility.canCopy
         )
+    }
+
+    private func enumerateFiles(in folder: URL, matching: (String) -> Bool) -> [URL] {
+        let keys: [URLResourceKey] = [.isRegularFileKey]
+        guard let enumerator = fileManager.enumerator(
+            at: folder,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return [] }
+
+        return enumerator.compactMap { item in
+            guard let url = item as? URL else { return nil }
+            let ext = url.pathExtension.lowercased()
+            guard matching(ext) else { return nil }
+            return url
+        }
     }
 
     private func loadDuration(from asset: AVURLAsset) async -> Double? {

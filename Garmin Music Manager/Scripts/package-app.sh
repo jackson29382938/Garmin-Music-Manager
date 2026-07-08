@@ -42,9 +42,26 @@ MACOS_DIR="$CONTENTS_DIR/MacOS"
 FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
 
-VERSION="$(git -C "$ROOT_DIR" describe --tags --always 2>/dev/null \
-  || git -C "$ROOT_DIR/.." describe --tags --always 2>/dev/null \
-  || echo "0.1.0")"
+# Prefer VERSION file (semver), then git tags, then fallback.
+VERSION_FILE="$ROOT_DIR/VERSION"
+if [[ -f "$VERSION_FILE" ]]; then
+  VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
+elif git -C "$ROOT_DIR" describe --tags --exact-match HEAD >/dev/null 2>&1; then
+  VERSION="$(git -C "$ROOT_DIR" describe --tags --exact-match HEAD | sed 's/^v//')"
+elif git -C "$ROOT_DIR/.." describe --tags --exact-match HEAD >/dev/null 2>&1; then
+  VERSION="$(git -C "$ROOT_DIR/.." describe --tags --exact-match HEAD | sed 's/^v//')"
+else
+  # Untagged builds: semver from file if present, else git short hash for diagnostics.
+  GIT_DESC="$(git -C "$ROOT_DIR" describe --tags --always 2>/dev/null \
+    || git -C "$ROOT_DIR/.." describe --tags --always 2>/dev/null \
+    || echo "")"
+  if [[ -n "$GIT_DESC" ]]; then
+    VERSION="$GIT_DESC"
+  else
+    VERSION="0.1.0"
+  fi
+fi
+echo "==> App version: $VERSION"
 ICON_SVG="$ROOT_DIR/Resources/AppIcon.svg"
 ICON_ICNS="$ROOT_DIR/Resources/AppIcon.icns"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}"

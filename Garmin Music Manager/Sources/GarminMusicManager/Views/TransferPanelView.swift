@@ -148,11 +148,13 @@ struct TransferPanelView: View {
         ViewThatFits(in: .horizontal) {
             HStack(spacing: 8) {
                 cancelButton
+                retryFailedButton
                 syncButton(compact: compact)
             }
 
             VStack(alignment: .trailing, spacing: 8) {
                 cancelButton
+                retryFailedButton
                 syncButton(compact: true)
             }
         }
@@ -166,6 +168,18 @@ struct TransferPanelView: View {
             } label: {
                 Label("Cancel", systemImage: "xmark.circle")
             }
+        }
+    }
+
+    @ViewBuilder
+    private var retryFailedButton: some View {
+        if model.canRetryFailedTransfers {
+            Button {
+                model.retryFailedTransfers()
+            } label: {
+                Label("Retry Failed", systemImage: "arrow.clockwise")
+            }
+            .help("Re-select only tracks that failed the last MTP transfer and open sync preview")
         }
     }
 
@@ -197,9 +211,14 @@ struct SyncPreviewSheet: View {
                 .font(.title2.bold())
 
             if model.hasMTPDestination {
-                Label("Only audio files transfer over MTP. Playlists are managed on the watch.", systemImage: "info.circle")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Label(
+                    model.syncSettings.writePlaylist
+                        ? "Audio transfers over MTP. After sync, a native Garmin playlist is created when the watch supports it."
+                        : "Audio transfers over MTP. Enable “Write playlist after sync” in Settings to create a native Garmin playlist.",
+                    systemImage: "info.circle"
+                )
+                .font(.caption)
+                .foregroundStyle(.secondary)
             }
 
             if let preview = model.syncPreview {
