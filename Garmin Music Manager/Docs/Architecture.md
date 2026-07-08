@@ -135,7 +135,9 @@ Sources/GarminMTPHelper/
 | Destination | Behavior when “Write playlist after sync” is on |
 |-------------|--------------------------------------------------|
 | Mounted folder | Writes `.m3u8` beside tracks with **correct relative subfolder paths** |
-| MTP | Creates a **native MTP playlist** (`LIBMTP_Create_New_Playlist`) from track object IDs after upload/refresh |
+| MTP | After upload/refresh, creates or **updates** a native playlist by name (`LIBMTP_Create_New_Playlist` / `LIBMTP_Update_Playlist`) |
+
+MTP playlist objects use C heap allocation (`strdup` / `malloc`) so `LIBMTP_destroy_playlist_t` can `free()` them safely. Playlist/track/file lists returned by libmtp are walked node-by-node when freeing (destroy helpers free one node only).
 
 Local `.m3u` / `.m3u8` files can be imported into the Mac queue (local paths only).
 
@@ -201,6 +203,22 @@ submit to Apple notarization when `NOTARIZE=1` + `CODESIGN_IDENTITY` +
 - **USB auto-detect** — `DeviceConnectMonitor` watches volume mount/unmount and polls Garmin USB signatures every ~6s.
 - **Smarter duplicates** — `TrackMatching` uses name+size, title+artist+size, or title+duration+size.
 - **Queue restore** — Mac track queue paths/selection are saved to `UserDefaults` and restored on launch when files still exist.
+
+## Transfer entry points (single engine)
+
+| UI action | Entry | Engine |
+|-----------|--------|--------|
+| **Sync Playlist…** | preview → `AppModel.sync()` | `SyncSessionController.run` |
+| **Send Selected to Garmin** | `AppModel.uploadSelectedTracksToDevice()` | same `sync()` / `run` path (no preview) |
+| **Add Files to device** | `DeviceSessionController.uploadFiles` | direct browser upload (not playlist-oriented) |
+
+Do not reintroduce a second MTP plan/execute path for “Send Selected”; it drifts from convert / overwrite / playlist behavior.
+
+## Development hygiene
+
+- Prefer **one writer** on this tree when large refactors are in flight (avoid half-wired untracked modules).
+- New controllers (`SyncSessionController`, `DeviceSessionController`) should be **wired and tracked in git** in the same change set that introduces them—or deleted.
+- Keep packaging version in `VERSION` (semver); tag releases `vX.Y.Z`.
 
 ## Remaining roadmap
 

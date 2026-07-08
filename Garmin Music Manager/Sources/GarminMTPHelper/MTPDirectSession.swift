@@ -461,7 +461,10 @@ final class MTPDirectSession {
         playlist.pointee.storage_id = firstStorageID()
         playlist.pointee.name = duplicatedCString(name)
         playlist.pointee.no_tracks = UInt32(trackIDs.count)
-        playlist.pointee.tracks = mallocTrackIDBuffer(trackIDs)
+        guard let trackBuffer = mallocTrackIDBuffer(trackIDs) else {
+            throw MTPHelperError(code: "memory", message: "Could not allocate playlist track buffer.")
+        }
+        playlist.pointee.tracks = trackBuffer
         playlist.pointee.next = nil
 
         let result: Int32
@@ -494,6 +497,36 @@ final class MTPDirectSession {
             buffer[index] = id
         }
         return buffer
+    }
+
+    /// Walk a libmtp singly-linked playlist list and free each node.
+    private func destroyPlaylistList(_ head: UnsafeMutablePointer<LIBMTP_playlist_t>?) {
+        var current = head
+        while let pointer = current {
+            let next = pointer.pointee.next
+            LIBMTP_destroy_playlist_t(pointer)
+            current = next
+        }
+    }
+
+    /// Walk a libmtp singly-linked track list and free each node.
+    private func destroyTrackList(_ head: UnsafeMutablePointer<LIBMTP_track_t>?) {
+        var current = head
+        while let pointer = current {
+            let next = pointer.pointee.next
+            LIBMTP_destroy_track_t(pointer)
+            current = next
+        }
+    }
+
+    /// Walk a libmtp singly-linked file list and free each node.
+    private func destroyFileList(_ head: UnsafeMutablePointer<LIBMTP_file_t>?) {
+        var current = head
+        while let pointer = current {
+            let next = pointer.pointee.next
+            LIBMTP_destroy_file_t(pointer)
+            current = next
+        }
     }
 
     /// Prefer Music folder as playlist parent when the device exposes one.
@@ -529,7 +562,8 @@ final class MTPDirectSession {
                 details: errors
             )
         }
-        defer { LIBMTP_destroy_file_t(head) }
+        // destroy_file_t frees a single node; walk the whole list.
+        defer { destroyFileList(head) }
 
         var records: [MTPFileRecord] = []
         var current: UnsafeMutablePointer<LIBMTP_file_t>? = head

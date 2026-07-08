@@ -888,28 +888,22 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// Sends selected Mac tracks using the **same** engine as Sync Playlist
+    /// (`sync()` → `SyncSessionController.run`). Skips the preview sheet only.
     func uploadSelectedTracksToDevice() {
         guard !syncableTracks.isEmpty else {
             appendLog("No selected compatible Mac tracks to send.")
             return
         }
+        guard canUploadSelectedTracksToDevice else {
+            if let reason = uploadDisabledReason {
+                appendLog(reason)
+            }
+            return
+        }
         guard prepareDeviceBrowserForUpload() else { return }
-
-        let preparation = syncSession.prepareTracks(syncableTracks, settings: syncSettings)
-        logTrackPreparation(preparation)
-        deviceSession.uploadPreparedTracks(
-            preparation: preparation,
-            deviceBrowser: deviceBrowser,
-            playlistName: playlistName,
-            settings: syncSettings,
-            syncSession: syncSession,
-            setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
-            onFinished: { [weak self] in self?.updateDuplicateFlags() },
-            onMTPResult: { [weak self] result in
-                self?.lastFailedTrackIDs = Set(result.failedTrackIDs)
-            },
-            log: { [weak self] message in self?.appendLog(message) }
-        )
+        appendLog("Sending selected tracks (same path as Sync Playlist)…")
+        Task { await sync() }
     }
 
     func openAppleMusicBrowser() {
