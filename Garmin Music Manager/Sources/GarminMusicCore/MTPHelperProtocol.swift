@@ -10,6 +10,8 @@ public enum MTPHelperOperation: String, Codable, Hashable {
     case delete
     case move
     case storageInfo
+    /// Create a native MTP playlist from track object IDs (`files[].objectID`).
+    case createPlaylist
 }
 
 public struct MTPHelperRequest: Codable, Hashable {
@@ -18,19 +20,23 @@ public struct MTPHelperRequest: Codable, Hashable {
     public var uploadFiles: [DeviceUploadFile]
     public var destinationPath: String?
     public var browseMode: DeviceBrowseMode
+    /// Playlist display name for `.createPlaylist`.
+    public var playlistName: String?
 
     public init(
         operation: MTPHelperOperation,
         files: [DeviceFile] = [],
         uploadFiles: [DeviceUploadFile] = [],
         destinationPath: String? = nil,
-        browseMode: DeviceBrowseMode = .musicOnly
+        browseMode: DeviceBrowseMode = .musicOnly,
+        playlistName: String? = nil
     ) {
         self.operation = operation
         self.files = files
         self.uploadFiles = uploadFiles
         self.destinationPath = destinationPath
         self.browseMode = browseMode
+        self.playlistName = playlistName
     }
 }
 

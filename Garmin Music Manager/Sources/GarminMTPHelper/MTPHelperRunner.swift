@@ -82,6 +82,17 @@ final class MTPHelperRunner {
                         dependencyStatus: dependencyStatus
                     )
                 }
+            case .createPlaylist:
+                return try withSession { session in
+                    MTPHelperResponse(
+                        ok: true,
+                        operationResult: try session.createPlaylist(
+                            name: request.playlistName,
+                            trackFiles: request.files
+                        ),
+                        dependencyStatus: dependencyStatus
+                    )
+                }
             case .move:
                 throw MTPHelperError(
                     code: "unsupported-move",

@@ -21,8 +21,8 @@ struct SettingsView: View {
 
                 Toggle("Convert ALAC/FLAC to AAC (requires ffmpeg)", isOn: $model.syncSettings.convertIncompatibleFormats)
 
-                Toggle("Write M3U8 playlist", isOn: $model.syncSettings.writePlaylist)
-                Text("M3U8 playlists are only written when syncing to a mounted folder. Garmin watches synced over USB/MTP reject non-audio files, so playlists are managed in Garmin Connect instead.")
+                Toggle("Write playlist after sync", isOn: $model.syncSettings.writePlaylist)
+                Text("Mounted folders get an .m3u8 file next to the tracks (with correct subfolder paths). MTP syncs create a native Garmin playlist when the watch supports it.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } header: {

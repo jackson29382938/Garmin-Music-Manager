@@ -1,5 +1,10 @@
 import Foundation
 
+/// Parses **legacy CLI tool text output** (mtp-files / mtp-tracks style).
+///
+/// The production app path uses direct libmtp via `GarminMTPHelper` and does not
+/// call this parser. Kept for unit tests and any offline diagnostics that still
+/// feed raw CLI dumps.
 public enum MTPOutputParser {
     private static let supportedAudioExtensions: Set<String> = ["mp3", "m4a", "aac", "wav", "flac", "alac"]
     private static let supportedPlaylistExtensions: Set<String> = ["m3u", "m3u8", "pls"]

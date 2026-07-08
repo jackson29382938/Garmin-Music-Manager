@@ -39,19 +39,37 @@ final class SyncCoordinator {
     func executeMTPPlan(
         _ plan: MTPSyncPlan,
         deviceBrowser: DeviceBrowserStore,
+        playlistName: String,
+        settings: SyncSettings,
+        refreshAfter: Bool = true,
         progress: @escaping @Sendable (Double, String?) -> Void
     ) async -> MTPSyncResult {
         let skipped = plan.skippedCount
-        if plan.transferCount == 0 {
-            progress(1, "All \(skipped) track(s) already on the Garmin.")
-            return MTPSyncResult(uploadedCount: 0, skippedCount: skipped, replacedCount: 0, failedCount: 0)
+        let uploads = plan.uploads
+
+        if plan.transferCount == 0 && uploads.isEmpty {
+            progress(0.85, settings.writePlaylist ? "Building playlist…" : nil)
+            let playlist = await maybeCreateMTPPlaylist(
+                plan: plan,
+                failedDisplayNames: [],
+                deviceBrowser: deviceBrowser,
+                playlistName: playlistName,
+                settings: settings,
+                refreshFirst: true,
+                progress: progress
+            )
+            progress(1, playlist.map { "Playlist “\($0)” ready." })
+            return MTPSyncResult(
+                uploadedCount: 0,
+                skippedCount: skipped,
+                replacedCount: 0,
+                failedCount: 0,
+                playlistName: playlist
+            )
         }
 
         progress(0.05, "Preparing \(plan.transferCount) track(s) for Garmin…")
 
-        // Replacements are handled per item by the helper: it deletes the old
-        // copy immediately before uploading its replacement.
-        let uploads = plan.uploads
         guard !uploads.isEmpty else {
             progress(1, nil)
             return MTPSyncResult(uploadedCount: 0, skippedCount: skipped, replacedCount: 0, failedCount: 0)
@@ -70,7 +88,7 @@ final class SyncCoordinator {
         var completedBytes: Int64 = 0
 
         let transferBase = 0.08
-        let transferSpan = 0.88
+        let transferSpan = settings.writePlaylist ? 0.78 : 0.88
 
         for chunk in chunks {
             try? Task.checkCancellation()
@@ -103,22 +121,76 @@ final class SyncCoordinator {
             completedBytes += chunkBytes
         }
 
-        progress(0.97, "Refreshing Garmin library…")
-        // One refresh at the end (warm session) instead of after every chunk.
-        await deviceBrowser.refresh(force: true)
-        progress(1, nil)
-
         let failedNames = Set(failedItems)
         let replacedCount = plan.items.filter {
             $0.action == .replace && !failedNames.contains($0.track.displayName)
         }.count
 
+        progress(0.90, "Refreshing Garmin library…")
+        await deviceBrowser.refresh(force: true)
+
+        let playlist = await maybeCreateMTPPlaylist(
+            plan: plan,
+            failedDisplayNames: failedNames,
+            deviceBrowser: deviceBrowser,
+            playlistName: playlistName,
+            settings: settings,
+            refreshFirst: false,
+            progress: progress
+        )
+
+        if refreshAfter, playlist != nil {
+            // Pull playlist collection into the browser after create.
+            await deviceBrowser.refresh(force: true)
+        }
+
+        progress(1, nil)
+
         return MTPSyncResult(
             uploadedCount: completed,
             skippedCount: skipped,
             replacedCount: replacedCount,
-            failedCount: failedItems.count
+            failedCount: failedItems.count,
+            playlistName: playlist
         )
+    }
+
+    private func maybeCreateMTPPlaylist(
+        plan: MTPSyncPlan,
+        failedDisplayNames: Set<String>,
+        deviceBrowser: DeviceBrowserStore,
+        playlistName: String,
+        settings: SyncSettings,
+        refreshFirst: Bool,
+        progress: @escaping @Sendable (Double, String?) -> Void
+    ) async -> String? {
+        guard settings.writePlaylist else { return nil }
+        guard deviceBrowser.backendKind == .mtp else { return nil }
+
+        if refreshFirst {
+            await deviceBrowser.refresh(force: true)
+        }
+
+        let tracks = MTPPlaylistResolver.playlistTracks(
+            plan: plan,
+            failedDisplayNames: failedDisplayNames,
+            deviceFiles: deviceBrowser.files
+        )
+        guard !tracks.isEmpty else {
+            progress(0.96, "Playlist skipped (no matching tracks on the Garmin yet).")
+            return nil
+        }
+
+        let cleanName = FileNameSanitizer.sanitizeFileName(playlistName)
+        progress(0.95, "Creating playlist “\(cleanName)”…")
+        if let result = await deviceBrowser.createPlaylist(name: cleanName, tracks: tracks) {
+            progress(0.98, result.message)
+            return cleanName
+        }
+        if let error = deviceBrowser.lastError {
+            progress(0.98, "Playlist not created: \(error)")
+        }
+        return nil
     }
 
     func syncMounted(

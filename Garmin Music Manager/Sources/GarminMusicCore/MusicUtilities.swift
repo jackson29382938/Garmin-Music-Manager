@@ -39,24 +39,103 @@ public enum PathSanitizer {
 public struct M3UWriter {
     public init() {}
 
+    public struct Entry: Hashable, Sendable {
+        public var relativePath: String
+        public var displayName: String
+        public var durationSeconds: Double?
+
+        public init(relativePath: String, displayName: String, durationSeconds: Double? = nil) {
+            self.relativePath = relativePath
+            self.displayName = displayName
+            self.durationSeconds = durationSeconds
+        }
+    }
+
+    /// Builds `#EXTM3U` text. `relativePath` should be relative to the playlist file's folder
+    /// and use `/` separators (e.g. `Artist/Album/Song.mp3`).
+    public func playlistText(entries: [Entry]) -> String {
+        var lines: [String] = ["#EXTM3U"]
+        for entry in entries {
+            let duration = entry.durationSeconds.map { String(Int($0.rounded())) } ?? "-1"
+            let path = entry.relativePath
+                .replacingOccurrences(of: "\\", with: "/")
+                .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            guard !path.isEmpty else { continue }
+            lines.append("#EXTINF:\(duration),\(entry.displayName)")
+            lines.append(path)
+        }
+        return lines.joined(separator: "\n") + "\n"
+    }
+
+    public func writePlaylist(
+        named playlistName: String,
+        entries: [Entry],
+        to folder: URL
+    ) throws -> URL {
+        let cleanName = PathSanitizer.sanitizeFileName(playlistName)
+        let playlistURL = folder.appendingPathComponent("\(cleanName).m3u8")
+        try playlistText(entries: entries).write(to: playlistURL, atomically: true, encoding: .utf8)
+        return playlistURL
+    }
+
     public func writePlaylist(
         named playlistName: String,
         tracks: [(url: URL, displayName: String, durationSeconds: Double?)],
         relativeTo folder: URL
     ) throws -> URL {
-        let cleanName = PathSanitizer.sanitizeFileName(playlistName)
-        let playlistURL = folder.appendingPathComponent("\(cleanName).m3u8")
-
-        var lines: [String] = ["#EXTM3U"]
-        for track in tracks {
-            let duration = track.durationSeconds.map { String(Int($0.rounded())) } ?? "-1"
-            lines.append("#EXTINF:\(duration),\(track.displayName)")
-            lines.append(track.url.lastPathComponent)
+        let folderPath = folder.standardizedFileURL.path
+        let entries = tracks.map { track -> Entry in
+            let trackPath = track.url.standardizedFileURL.path
+            let relative: String
+            if trackPath.hasPrefix(folderPath + "/") {
+                relative = String(trackPath.dropFirst(folderPath.count + 1))
+            } else {
+                relative = track.url.lastPathComponent
+            }
+            return Entry(
+                relativePath: relative,
+                displayName: track.displayName,
+                durationSeconds: track.durationSeconds
+            )
         }
+        return try writePlaylist(named: playlistName, entries: entries, to: folder)
+    }
+}
 
-        let text = lines.joined(separator: "\n") + "\n"
-        try text.write(to: playlistURL, atomically: true, encoding: .utf8)
-        return playlistURL
+/// Parses local `.m3u` / `.m3u8` files into file URLs (skips remote http(s) entries).
+public enum M3UImporter {
+    public static func localTrackURLs(from playlistURL: URL) throws -> [URL] {
+        let text = try String(contentsOf: playlistURL, encoding: .utf8)
+        let base = playlistURL.deletingLastPathComponent()
+        var urls: [URL] = []
+        var seen = Set<String>()
+
+        for rawLine in text.components(separatedBy: .newlines) {
+            let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            let lower = line.lowercased()
+            if lower.hasPrefix("http://") || lower.hasPrefix("https://") || lower.hasPrefix("rtsp://") {
+                continue
+            }
+
+            let candidate: URL
+            if line.hasPrefix("/") {
+                candidate = URL(fileURLWithPath: line)
+            } else if line.contains("://") {
+                guard let remote = URL(string: line), remote.isFileURL else { continue }
+                candidate = remote
+            } else {
+                candidate = base.appendingPathComponent(line)
+            }
+
+            let standardized = candidate.standardizedFileURL
+            let key = standardized.path
+            guard !seen.contains(key) else { continue }
+            guard FileManager.default.fileExists(atPath: standardized.path) else { continue }
+            seen.insert(key)
+            urls.append(standardized)
+        }
+        return urls
     }
 }
 

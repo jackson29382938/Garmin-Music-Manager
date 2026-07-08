@@ -113,10 +113,21 @@ Mounted folders use `MountedFolderDeviceFileSystem` implementing the same
 Sources/GarminMTPHelper/
 ├── HelperEntry.swift       — @main, one-shot + --serve loop
 ├── MTPHelperRunner.swift   — request dispatch + session reuse
-├── MTPDirectSession.swift  — libmtp session / list / upload / delete
+├── MTPDirectSession.swift  — libmtp session / list / upload / delete / playlists
 ├── MTPDirectStatus.swift   — dependency diagnostics
+├── MTPProgressReporter.swift — NDJSON progress + libmtp trampoline
+├── MTPCancelState.swift    — SIGUSR1 cooperative cancel
 └── MTPHelperModels.swift   — folder index, file records, path helpers
 ```
+
+### Playlists
+
+| Destination | Behavior when “Write playlist after sync” is on |
+|-------------|--------------------------------------------------|
+| Mounted folder | Writes `.m3u8` beside tracks with **correct relative subfolder paths** |
+| MTP | Creates a **native MTP playlist** (`LIBMTP_Create_New_Playlist`) from track object IDs after upload/refresh |
+
+Local `.m3u` / `.m3u8` files can be imported into the Mac queue (local paths only).
 
 ## Safety rules
 
@@ -165,5 +176,6 @@ submit to Apple notarization when `NOTARIZE=1` + `CODESIGN_IDENTITY` +
 ## Remaining roadmap
 
 - **Metadata editor** — lightweight tag repair sheet
-- **Playlist import** — Apple Music XML, `.m3u` files
+- **Apple Music XML playlist import** — beyond `.m3u` / Music.app browser
 - **MTP move** — native in-place move when firmware supports it
+- **Update existing MTP playlists** — replace track list when name already exists

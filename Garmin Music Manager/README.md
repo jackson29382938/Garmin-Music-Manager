@@ -13,7 +13,8 @@ A native macOS SwiftUI app for managing local music files on Garmin music watche
 - **Compatibility checks** — warns about ALAC, DRM, missing metadata, unsupported formats, large files
 - **Duplicate detection** — marks tracks already present on the destination
 - **Sync preview** — dry-run before copying (copy / skip / replace / keep both)
-- **Flexible sync** — overwrite policies, artist/album folder organization, M3U8 playlist generation
+- **Flexible sync** — overwrite policies, artist/album folders; M3U8 on mounted volumes and native MTP playlists
+- **Playlist import** — load local tracks from `.m3u` / `.m3u8` files
 - **Device contents** — browse existing audio on destination, delete with confirmation
 - **Storage budgeting** — shows free/used space and warns when selected tracks exceed available storage
 - **Persistence** — remembers last destination, playlist name, and sync settings

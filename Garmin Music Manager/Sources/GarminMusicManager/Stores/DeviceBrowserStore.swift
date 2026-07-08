@@ -401,6 +401,26 @@ final class DeviceBrowserStore: ObservableObject {
         }
     }
 
+    @discardableResult
+    func createPlaylist(name: String, tracks: [DeviceFile]) async -> DeviceFileOperationResult? {
+        guard let backend, !tracks.isEmpty else { return nil }
+        operation = DeviceOperation(
+            kind: .sync,
+            phase: "Creating playlist “\(name)”",
+            progress: nil,
+            canCancel: backend.backendKind == .mtp
+        )
+        do {
+            let result = try await backend.createPlaylist(name: name, tracks: tracks)
+            invalidateCurrentCache()
+            applyOperationResult(result, kind: .sync, successMessage: result.message ?? "Playlist created.")
+            return result
+        } catch {
+            applyOperationError(error, kind: .sync)
+            return nil
+        }
+    }
+
     func invalidateCurrentCache() {
         guard let backend else { return }
         cache.removeValue(forKey: CacheKey(deviceID: backend.deviceID, mode: browseMode))

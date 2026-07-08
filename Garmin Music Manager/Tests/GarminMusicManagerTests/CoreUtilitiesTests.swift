@@ -45,6 +45,51 @@ final class M3UWriterTests: XCTestCase {
         XCTAssertTrue(text.contains("#EXTINF:201,Artist - Song"))
         XCTAssertTrue(text.contains("Artist - Song.mp3"))
     }
+
+    func testWritePlaylistKeepsSubfolderRelativePaths() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let nested = folder.appendingPathComponent("Artist/Album", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let trackURL = nested.appendingPathComponent("Song.mp3")
+        FileManager.default.createFile(atPath: trackURL.path, contents: Data())
+
+        let writer = M3UWriter()
+        let playlistURL = try writer.writePlaylist(
+            named: "Nested",
+            tracks: [(trackURL, "Song", 120)],
+            relativeTo: folder
+        )
+        let text = try String(contentsOf: playlistURL, encoding: .utf8)
+        XCTAssertTrue(text.contains("Artist/Album/Song.mp3"), "expected nested relative path, got:\n\(text)")
+    }
+}
+
+final class M3UImporterTests: XCTestCase {
+    func testImportSkipsRemoteAndMissingLocalEntries() throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: folder) }
+
+        let local = folder.appendingPathComponent("local.mp3")
+        FileManager.default.createFile(atPath: local.path, contents: Data([0x01]))
+
+        let playlist = folder.appendingPathComponent("mix.m3u8")
+        let body = """
+        #EXTM3U
+        #EXTINF:10,Local
+        local.mp3
+        #EXTINF:10,Remote
+        https://example.com/stream.mp3
+        #EXTINF:10,Missing
+        missing.mp3
+        """
+        try body.write(to: playlist, atomically: true, encoding: .utf8)
+
+        let urls = try M3UImporter.localTrackURLs(from: playlist)
+        XCTAssertEqual(urls.map(\.lastPathComponent), ["local.mp3"])
+    }
 }
 
 final class MusicCompatibilityEvaluatorTests: XCTestCase {

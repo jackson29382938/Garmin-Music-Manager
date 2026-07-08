@@ -57,6 +57,12 @@ struct PrimaryActionsToolbar: ToolbarContent {
                 .keyboardShortcut("o", modifiers: [.command, .shift])
 
                 Button {
+                    model.chooseM3UPlaylist()
+                } label: {
+                    Label("Import M3U Playlist…", systemImage: "list.bullet.rectangle")
+                }
+
+                Button {
                     model.openAppleMusicBrowser()
                 } label: {
                     Label("Apple Music", systemImage: "music.note.list")
@@ -64,7 +70,7 @@ struct PrimaryActionsToolbar: ToolbarContent {
             } label: {
                 Label("Add Music", systemImage: "plus")
             }
-            .help("Add music files, folders, or Apple Music tracks")
+            .help("Add music files, folders, M3U playlists, or Apple Music tracks")
 
             Button {
                 model.selectAllReady()

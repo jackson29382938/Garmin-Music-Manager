@@ -13,6 +13,22 @@ struct MTPSyncResult {
     let skippedCount: Int
     let replacedCount: Int
     let failedCount: Int
+    /// Native MTP playlist name when one was created successfully.
+    let playlistName: String?
+
+    init(
+        uploadedCount: Int,
+        skippedCount: Int,
+        replacedCount: Int,
+        failedCount: Int,
+        playlistName: String? = nil
+    ) {
+        self.uploadedCount = uploadedCount
+        self.skippedCount = skippedCount
+        self.replacedCount = replacedCount
+        self.failedCount = failedCount
+        self.playlistName = playlistName
+    }
 }
 
 struct SyncPreviewItem: Identifiable, Hashable {

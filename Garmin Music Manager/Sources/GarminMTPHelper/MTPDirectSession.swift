@@ -388,6 +388,91 @@ final class MTPDirectSession {
         )
     }
 
+    /// Creates a native MTP playlist referencing existing track object IDs.
+    func createPlaylist(name: String?, trackFiles: [DeviceFile]) throws -> DeviceFileOperationResult {
+        try MTPCancelState.throwIfCancelled()
+        let cleanName = (name ?? "Garmin Playlist")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let playlistName = cleanName.isEmpty ? "Garmin Playlist" : sanitizedFileName(cleanName, fallback: "Garmin Playlist")
+
+        var trackIDs: [UInt32] = []
+        var failures: [String] = []
+        var seen = Set<UInt32>()
+        for file in trackFiles {
+            guard let objectID = UInt32(file.objectID ?? ""), objectID != 0 else {
+                failures.append(file.name)
+                continue
+            }
+            if seen.insert(objectID).inserted {
+                trackIDs.append(objectID)
+            }
+        }
+
+        guard !trackIDs.isEmpty else {
+            throw MTPHelperError(
+                code: "playlist-empty",
+                message: "No track IDs were available to build the playlist \(playlistName)."
+            )
+        }
+
+        try MTPRetryPolicy.runWithRetry {
+            try self.createPlaylistOnce(name: playlistName, trackIDs: trackIDs)
+        }
+
+        return DeviceFileOperationResult(
+            completedCount: trackIDs.count,
+            failedItems: failures,
+            message: "Created playlist “\(playlistName)” with \(trackIDs.count) track(s)."
+        )
+    }
+
+    private func createPlaylistOnce(name: String, trackIDs: [UInt32]) throws {
+        guard let playlist = LIBMTP_new_playlist_t() else {
+            throw MTPHelperError(code: "playlist-failed", message: "Could not allocate MTP playlist metadata.")
+        }
+        defer { LIBMTP_destroy_playlist_t(playlist) }
+
+        playlist.pointee.playlist_id = 0
+        playlist.pointee.parent_id = firstStorageMusicParentID()
+        playlist.pointee.storage_id = firstStorageID()
+        playlist.pointee.name = duplicatedCString(name)
+        playlist.pointee.no_tracks = UInt32(trackIDs.count)
+
+        let trackBuffer = UnsafeMutablePointer<UInt32>.allocate(capacity: trackIDs.count)
+        for (index, id) in trackIDs.enumerated() {
+            trackBuffer[index] = id
+        }
+        playlist.pointee.tracks = trackBuffer
+        // LIBMTP_destroy_playlist_t frees tracks; transfer ownership by not deallocating here.
+        // Actually destroy_playlist_t may free tracks — check: typically it frees the array.
+        // We must not deallocate trackBuffer ourselves if destroy owns it.
+        // libmtp destroy_playlist_t frees name and tracks.
+
+        let result = LIBMTP_Create_New_Playlist(device, playlist)
+        // After create, libmtp may have taken ownership; destroy still frees the struct fields.
+        guard result == 0 else {
+            // If create failed, destroy will free trackBuffer via playlist.tracks.
+            throw operationError(
+                code: "playlist-failed",
+                message: "Could not create the playlist \(name) on the Garmin.",
+                details: drainErrorStack()
+            )
+        }
+        // Success: destroy_playlist_t still needed for the local struct; Create may leave IDs filled.
+    }
+
+    /// Prefer Music folder as playlist parent when the device exposes one.
+    private func firstStorageMusicParentID() -> UInt32 {
+        if let music = (try? folderIndexCached())?.location(path: "Music") {
+            return music.id
+        }
+        let defaultMusic = device.pointee.default_music_folder
+        if defaultMusic != 0 {
+            return defaultMusic
+        }
+        return Self.rootFolderID
+    }
+
     private func deleteSingleObject(objectID: UInt32, name: String) throws {
         let result = LIBMTP_Delete_Object(device, objectID)
         guard result == 0 else {

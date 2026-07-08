@@ -24,6 +24,14 @@ protocol DeviceFileSystem {
     func delete(_ files: [DeviceFile]) async throws -> DeviceFileOperationResult
     func move(_ files: [DeviceFile], to destinationFolder: URL) async throws -> DeviceFileOperationResult
     func storageInfo() async throws -> DeviceStorageInfo?
+    /// Optional: create a native device playlist. Default is unsupported.
+    func createPlaylist(name: String, tracks: [DeviceFile]) async throws -> DeviceFileOperationResult
+}
+
+extension DeviceFileSystem {
+    func createPlaylist(name: String, tracks: [DeviceFile]) async throws -> DeviceFileOperationResult {
+        throw DeviceFileSystemError.unsupported("Playlists are only created over MTP.")
+    }
 }
 
 enum DeviceFileSystemError: LocalizedError {
@@ -343,6 +351,12 @@ final class MountedFolderDeviceFileSystem: DeviceFileSystem {
         }.value
     }
 
+    func createPlaylist(name: String, tracks: [DeviceFile]) async throws -> DeviceFileOperationResult {
+        throw DeviceFileSystemError.unsupported(
+            "Mounted folders use .m3u8 playlist files instead of native MTP playlists."
+        )
+    }
+
     private func listFiles(includeAllFiles: Bool) throws -> [DeviceFile] {
         guard let enumerator = fileManager.enumerator(
             at: rootURL,
@@ -522,6 +536,16 @@ final class MTPDeviceFileSystem: DeviceFileSystem {
 
     func storageInfo() async throws -> DeviceStorageInfo? {
         try await listMusic().storageInfo
+    }
+
+    func createPlaylist(name: String, tracks: [DeviceFile]) async throws -> DeviceFileOperationResult {
+        try await helperClient.operationResult(
+            request: MTPHelperRequest(
+                operation: .createPlaylist,
+                files: tracks,
+                playlistName: name
+            )
+        )
     }
 }
 
@@ -711,7 +735,7 @@ final class MTPHelperClient {
             return min(600, max(45, 30 + TimeInterval(request.files.count * 4)))
         case .move:
             return 600
-        case .status, .detect, .listMusic, .listStorageTree, .storageInfo:
+        case .status, .detect, .listMusic, .listStorageTree, .storageInfo, .createPlaylist:
             // Warm session makes listing far cheaper; keep headroom for large libraries.
             return request.operation == .listStorageTree ? 180 : 90
         }
