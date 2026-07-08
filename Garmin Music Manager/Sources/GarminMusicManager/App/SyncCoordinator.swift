@@ -57,38 +57,53 @@ final class SyncCoordinator {
             return MTPSyncResult(uploadedCount: 0, skippedCount: skipped, replacedCount: 0, failedCount: 0)
         }
 
-        // Chunk uploads for progress + partial recovery. The persistent helper keeps
-        // the MTP session warm between chunks, so this is not a cold re-open each time.
+        // Chunk uploads for partial recovery. Progress comes from libmtp NDJSON
+        // events (per-byte within each file) remapped across the full plan.
         let chunkSize = MTPHelperClient.uploadChunkSize
         let chunks: [[DeviceUploadFile]] = stride(from: 0, to: uploads.count, by: chunkSize).map {
             Array(uploads[$0..<min($0 + chunkSize, uploads.count)])
         }
 
+        let totalBytes = max(plan.totalBytesToTransfer, 1)
         var completed = 0
         var failedItems: [String] = []
+        var completedBytes: Int64 = 0
 
-        for (index, chunk) in chunks.enumerated() {
+        let transferBase = 0.08
+        let transferSpan = 0.88
+
+        for chunk in chunks {
             try? Task.checkCancellation()
             if Task.isCancelled {
                 break
             }
-            let base = 0.1
-            let span = 0.85
-            let chunkStart = base + span * (Double(index) / Double(max(chunks.count, 1)))
+            let chunkBytes = chunk.reduce(Int64(0)) { partial, file in
+                let size = (try? URL(fileURLWithPath: file.localPath).resourceValues(forKeys: [.fileSizeKey]).fileSize)
+                    .map(Int64.init) ?? 0
+                return partial + max(size, 0)
+            }
+            let bytesBeforeChunk = completedBytes
+
             progress(
-                chunkStart,
-                "Uploading \(completed + 1)–\(min(completed + chunk.count, uploads.count)) of \(uploads.count) to Garmin…"
+                transferBase + transferSpan * (Double(bytesBeforeChunk) / Double(totalBytes)),
+                "Uploading \(completed + 1)–\(min(completed + chunk.count, uploads.count)) of \(uploads.count)…"
             )
 
-            if let uploadResult = await deviceBrowser.upload(chunk, refreshAfter: false) {
+            if let uploadResult = await deviceBrowser.upload(chunk, refreshAfter: false, onProgress: { event in
+                let withinChunk = event.overallFraction * Double(max(chunkBytes, 1))
+                let overallBytes = Double(bytesBeforeChunk) + withinChunk
+                let fraction = transferBase + transferSpan * min(1, overallBytes / Double(totalBytes))
+                progress(fraction, event.displayMessage)
+            }) {
                 completed += uploadResult.completedCount
                 failedItems.append(contentsOf: uploadResult.failedItems)
             } else {
                 failedItems.append(contentsOf: chunk.map(\.displayName))
             }
+            completedBytes += chunkBytes
         }
 
-        progress(0.97, "Finishing MTP transfer…")
+        progress(0.97, "Refreshing Garmin library…")
         // One refresh at the end (warm session) instead of after every chunk.
         await deviceBrowser.refresh(force: true)
         progress(1, nil)

@@ -21,6 +21,8 @@ struct GarminMTPHelper {
     /// multi-file sync avoids re-detecting the device and re-enumerating storage.
     private static func runServeLoop(output: FileHandle) {
         let runner = MTPHelperRunner(reuseSession: true)
+        let progress = MTPProgressReporter(handle: output)
+        runner.setProgressReporter(progress)
         let stdin = FileHandle.standardInput
 
         while true {
@@ -37,9 +39,6 @@ struct GarminMTPHelper {
                     let decoder = JSONDecoder()
                     decoder.dateDecodingStrategy = .iso8601
                     let request = try decoder.decode(MTPHelperRequest.self, from: Data(trimmed.utf8))
-                    if request.operation == .status, CommandLine.arguments.contains("--close-on-status") {
-                        // reserved; status still returns diagnostics without closing
-                    }
                     response = runner.handle(request)
                 } catch let error as MTPHelperError {
                     response = MTPHelperResponse(ok: false, error: error)
@@ -51,6 +50,7 @@ struct GarminMTPHelper {
                 }
 
                 do {
+                    // Progress lines (if any) were already flushed; write final result.
                     try writeLine(response, to: output)
                 } catch {
                     runner.closeSession()
@@ -67,12 +67,14 @@ struct GarminMTPHelper {
             decoder.dateDecodingStrategy = .iso8601
             let request = try decoder.decode(MTPHelperRequest.self, from: requestData)
             let runner = MTPHelperRunner(reuseSession: false)
+            // One-shot also emits NDJSON progress lines so both transports share a parser.
+            runner.setProgressReporter(MTPProgressReporter(handle: output))
             let response = runner.handle(request)
-            try write(response, to: output)
+            try writeLine(response, to: output)
         } catch let error as MTPHelperError {
-            try? write(MTPHelperResponse(ok: false, error: error), to: output)
+            try? writeLine(MTPHelperResponse(ok: false, error: error), to: output)
         } catch {
-            try? write(MTPHelperResponse(
+            try? writeLine(MTPHelperResponse(
                 ok: false,
                 error: MTPHelperError(code: "helper-error", message: error.localizedDescription)
             ), to: output)

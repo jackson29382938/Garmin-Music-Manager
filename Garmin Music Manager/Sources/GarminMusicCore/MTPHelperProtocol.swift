@@ -56,6 +56,128 @@ public struct MTPHelperResponse: Codable, Hashable {
     }
 }
 
+/// Byte/item progress emitted as NDJSON lines **before** the final `MTPHelperResponse`.
+///
+/// Stream framing (serve mode):
+/// ```text
+/// {"progress":{...}}\n
+/// {"progress":{...}}\n
+/// {"ok":true,"operationResult":{...}}\n
+/// ```
+public struct MTPProgressEvent: Codable, Hashable, Sendable {
+    public var phase: String
+    /// Zero-based index of the current item within this helper request.
+    public var itemIndex: Int
+    public var itemCount: Int
+    public var itemName: String?
+    public var bytesTransferred: Int64?
+    public var bytesTotal: Int64?
+    /// 0...1 for the whole helper request (all items in the current batch).
+    public var overallFraction: Double
+    public var message: String?
+
+    public init(
+        phase: String,
+        itemIndex: Int,
+        itemCount: Int,
+        itemName: String? = nil,
+        bytesTransferred: Int64? = nil,
+        bytesTotal: Int64? = nil,
+        overallFraction: Double,
+        message: String? = nil
+    ) {
+        self.phase = phase
+        self.itemIndex = itemIndex
+        self.itemCount = itemCount
+        self.itemName = itemName
+        self.bytesTransferred = bytesTransferred
+        self.bytesTotal = bytesTotal
+        self.overallFraction = min(1, max(0, overallFraction))
+        self.message = message
+    }
+
+    public var displayMessage: String {
+        if let message, !message.isEmpty { return message }
+        if let itemName, !itemName.isEmpty {
+            return "\(phase.capitalized) \(itemIndex + 1)/\(max(itemCount, 1)): \(itemName)"
+        }
+        return "\(phase.capitalized) \(itemIndex + 1)/\(max(itemCount, 1))"
+    }
+}
+
+/// Wire format for one NDJSON line from the helper (progress **or** final result).
+public struct MTPHelperStreamLine: Codable, Hashable {
+    public var progress: MTPProgressEvent?
+    public var ok: Bool?
+    public var snapshot: DeviceFileSystemSnapshot?
+    public var operationResult: DeviceFileOperationResult?
+    public var dependencyStatus: MTPToolStatus?
+    public var error: MTPHelperError?
+
+    public init(
+        progress: MTPProgressEvent? = nil,
+        ok: Bool? = nil,
+        snapshot: DeviceFileSystemSnapshot? = nil,
+        operationResult: DeviceFileOperationResult? = nil,
+        dependencyStatus: MTPToolStatus? = nil,
+        error: MTPHelperError? = nil
+    ) {
+        self.progress = progress
+        self.ok = ok
+        self.snapshot = snapshot
+        self.operationResult = operationResult
+        self.dependencyStatus = dependencyStatus
+        self.error = error
+    }
+
+    public var isProgressOnly: Bool {
+        progress != nil
+            && ok == nil
+            && snapshot == nil
+            && operationResult == nil
+            && dependencyStatus == nil
+            && error == nil
+    }
+
+    public var asResponse: MTPHelperResponse? {
+        guard !isProgressOnly else { return nil }
+        if let ok {
+            return MTPHelperResponse(
+                ok: ok,
+                snapshot: snapshot,
+                operationResult: operationResult,
+                dependencyStatus: dependencyStatus,
+                error: error
+            )
+        }
+        // Progress-less error-only / result-only lines.
+        if error != nil || operationResult != nil || snapshot != nil || dependencyStatus != nil {
+            return MTPHelperResponse(
+                ok: error == nil,
+                snapshot: snapshot,
+                operationResult: operationResult,
+                dependencyStatus: dependencyStatus,
+                error: error
+            )
+        }
+        return nil
+    }
+
+    public static func progressLine(_ event: MTPProgressEvent) -> MTPHelperStreamLine {
+        MTPHelperStreamLine(progress: event)
+    }
+}
+
+/// Encodes a progress-only stream line as NDJSON (no trailing newline).
+public enum MTPProgressLineEncoder {
+    public static func encode(_ event: MTPProgressEvent) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(MTPHelperStreamLine.progressLine(event))
+    }
+}
+
 public struct MTPHelperError: Codable, Hashable, LocalizedError {
     public var code: String
     public var message: String

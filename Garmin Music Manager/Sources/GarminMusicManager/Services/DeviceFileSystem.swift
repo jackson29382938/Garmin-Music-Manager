@@ -1,6 +1,8 @@
 import Foundation
 import GarminMusicCore
 
+typealias MTPTransferProgressHandler = @Sendable (MTPProgressEvent) -> Void
+
 protocol DeviceFileSystem {
     var deviceID: String { get }
     var displayName: String { get }
@@ -9,8 +11,16 @@ protocol DeviceFileSystem {
 
     func listMusic() async throws -> DeviceFileSystemSnapshot
     func listStorageTree() async throws -> DeviceFileSystemSnapshot
-    func download(_ files: [DeviceFile], to destinationFolder: URL) async throws -> DeviceFileOperationResult
-    func upload(_ files: [DeviceUploadFile], syncSettings: SyncSettings?) async throws -> DeviceFileOperationResult
+    func download(
+        _ files: [DeviceFile],
+        to destinationFolder: URL,
+        onProgress: MTPTransferProgressHandler?
+    ) async throws -> DeviceFileOperationResult
+    func upload(
+        _ files: [DeviceUploadFile],
+        syncSettings: SyncSettings?,
+        onProgress: MTPTransferProgressHandler?
+    ) async throws -> DeviceFileOperationResult
     func delete(_ files: [DeviceFile]) async throws -> DeviceFileOperationResult
     func move(_ files: [DeviceFile], to destinationFolder: URL) async throws -> DeviceFileOperationResult
     func storageInfo() async throws -> DeviceStorageInfo?
@@ -85,13 +95,35 @@ final class MountedFolderDeviceFileSystem: DeviceFileSystem {
         }.value
     }
 
-    func download(_ files: [DeviceFile], to destinationFolder: URL) async throws -> DeviceFileOperationResult {
+    func download(
+        _ files: [DeviceFile],
+        to destinationFolder: URL,
+        onProgress: MTPTransferProgressHandler?
+    ) async throws -> DeviceFileOperationResult {
         try await Task.detached(priority: .userInitiated) {
             try self.fileManager.createDirectory(at: destinationFolder, withIntermediateDirectories: true)
             var copied = 0
             var failures: [String] = []
+            let itemCount = files.count
+            let totalBytes = files.reduce(Int64(0)) { $0 + max($1.size, 0) }
+            var completedBytes: Int64 = 0
 
-            for file in files {
+            for (index, file) in files.enumerated() {
+                let itemBytes = max(file.size, 0)
+                onProgress?(
+                    MTPProgressEvent(
+                        phase: "download",
+                        itemIndex: index,
+                        itemCount: itemCount,
+                        itemName: file.name,
+                        bytesTransferred: 0,
+                        bytesTotal: itemBytes > 0 ? itemBytes : nil,
+                        overallFraction: totalBytes > 0
+                            ? Double(completedBytes) / Double(totalBytes)
+                            : Double(index) / Double(max(itemCount, 1)),
+                        message: "Copying \(index + 1)/\(itemCount): \(file.name)"
+                    )
+                )
                 do {
                     let source = self.url(for: file)
                     let target = FileNameSanitizer.uniqueURL(
@@ -101,6 +133,21 @@ final class MountedFolderDeviceFileSystem: DeviceFileSystem {
                     try self.fileManager.copyItem(at: source, to: target)
                     try self.verifyCopy(source: source, target: target)
                     copied += 1
+                    completedBytes += itemBytes
+                    onProgress?(
+                        MTPProgressEvent(
+                            phase: "download",
+                            itemIndex: index,
+                            itemCount: itemCount,
+                            itemName: file.name,
+                            bytesTransferred: itemBytes,
+                            bytesTotal: itemBytes > 0 ? itemBytes : nil,
+                            overallFraction: totalBytes > 0
+                                ? Double(completedBytes) / Double(totalBytes)
+                                : Double(index + 1) / Double(max(itemCount, 1)),
+                            message: "Copied \(index + 1)/\(itemCount): \(file.name)"
+                        )
+                    )
                 } catch {
                     failures.append(file.name)
                 }
@@ -114,13 +161,22 @@ final class MountedFolderDeviceFileSystem: DeviceFileSystem {
         }.value
     }
 
-    func upload(_ files: [DeviceUploadFile], syncSettings: SyncSettings?) async throws -> DeviceFileOperationResult {
+    func upload(
+        _ files: [DeviceUploadFile],
+        syncSettings: SyncSettings?,
+        onProgress: MTPTransferProgressHandler?
+    ) async throws -> DeviceFileOperationResult {
         await Task.detached(priority: .userInitiated) {
             var copied = 0
             var skipped = 0
             var failures: [String] = []
+            let itemCount = files.count
+            let totalBytes = files.reduce(Int64(0)) { partial, file in
+                partial + max(self.fileSize(at: URL(fileURLWithPath: file.localPath)), 0)
+            }
+            var completedBytes: Int64 = 0
 
-            for file in files {
+            for (index, file) in files.enumerated() {
                 do {
                     let source = URL(fileURLWithPath: file.localPath)
                     let relativePath = file.remotePath.isEmpty ? source.lastPathComponent : file.remotePath
@@ -128,11 +184,27 @@ final class MountedFolderDeviceFileSystem: DeviceFileSystem {
                     try self.fileManager.createDirectory(at: target.deletingLastPathComponent(), withIntermediateDirectories: true)
 
                     let sourceSize = self.fileSize(at: source)
+                    onProgress?(
+                        MTPProgressEvent(
+                            phase: "upload",
+                            itemIndex: index,
+                            itemCount: itemCount,
+                            itemName: file.displayName,
+                            bytesTransferred: 0,
+                            bytesTotal: sourceSize > 0 ? sourceSize : nil,
+                            overallFraction: totalBytes > 0
+                                ? Double(completedBytes) / Double(totalBytes)
+                                : Double(index) / Double(max(itemCount, 1)),
+                            message: "Copying \(index + 1)/\(itemCount): \(file.displayName)"
+                        )
+                    )
+
                     let finalTarget: URL
                     if self.fileManager.fileExists(atPath: target.path), let settings = syncSettings {
                         switch self.resolveUploadAction(sourceSize: sourceSize, target: target, settings: settings) {
                         case .skip:
                             skipped += 1
+                            completedBytes += sourceSize
                             continue
                         case .replace:
                             try self.fileManager.removeItem(at: target)
@@ -152,6 +224,21 @@ final class MountedFolderDeviceFileSystem: DeviceFileSystem {
                     try self.fileManager.copyItem(at: source, to: finalTarget)
                     try self.verifyCopy(source: source, target: finalTarget)
                     copied += 1
+                    completedBytes += sourceSize
+                    onProgress?(
+                        MTPProgressEvent(
+                            phase: "upload",
+                            itemIndex: index,
+                            itemCount: itemCount,
+                            itemName: file.displayName,
+                            bytesTransferred: sourceSize,
+                            bytesTotal: sourceSize > 0 ? sourceSize : nil,
+                            overallFraction: totalBytes > 0
+                                ? Double(completedBytes) / Double(totalBytes)
+                                : Double(index + 1) / Double(max(itemCount, 1)),
+                            message: "Copied \(index + 1)/\(itemCount): \(file.displayName)"
+                        )
+                    )
                 } catch {
                     failures.append(file.displayName)
                 }
@@ -398,17 +485,31 @@ final class MTPDeviceFileSystem: DeviceFileSystem {
         try await helperClient.snapshot(request: MTPHelperRequest(operation: .listStorageTree, browseMode: .advancedStorage))
     }
 
-    func download(_ files: [DeviceFile], to destinationFolder: URL) async throws -> DeviceFileOperationResult {
-        try await helperClient.operationResult(request: MTPHelperRequest(
-            operation: .download,
-            files: files,
-            destinationPath: destinationFolder.path
-        ))
+    func download(
+        _ files: [DeviceFile],
+        to destinationFolder: URL,
+        onProgress: MTPTransferProgressHandler?
+    ) async throws -> DeviceFileOperationResult {
+        try await helperClient.operationResult(
+            request: MTPHelperRequest(
+                operation: .download,
+                files: files,
+                destinationPath: destinationFolder.path
+            ),
+            onProgress: onProgress
+        )
     }
 
-    func upload(_ files: [DeviceUploadFile], syncSettings: SyncSettings?) async throws -> DeviceFileOperationResult {
+    func upload(
+        _ files: [DeviceUploadFile],
+        syncSettings: SyncSettings?,
+        onProgress: MTPTransferProgressHandler?
+    ) async throws -> DeviceFileOperationResult {
         _ = syncSettings
-        return try await helperClient.operationResult(request: MTPHelperRequest(operation: .upload, uploadFiles: files))
+        return try await helperClient.operationResult(
+            request: MTPHelperRequest(operation: .upload, uploadFiles: files),
+            onProgress: onProgress
+        )
     }
 
     func delete(_ files: [DeviceFile]) async throws -> DeviceFileOperationResult {
@@ -481,14 +582,21 @@ final class MTPHelperClient {
         return snapshot
     }
 
-    func operationResult(request: MTPHelperRequest) async throws -> DeviceFileOperationResult {
+    func operationResult(
+        request: MTPHelperRequest,
+        onProgress: MTPTransferProgressHandler? = nil
+    ) async throws -> DeviceFileOperationResult {
         // Chunk large uploads so one flaky file doesn't burn a multi-hour timeout
         // and so the UI can advance between chunks (caller may also chunk).
         if request.operation == .upload, request.uploadFiles.count > Self.uploadChunkSize {
-            return try await uploadInChunks(request.uploadFiles)
+            return try await uploadInChunks(request.uploadFiles, onProgress: onProgress)
         }
 
-        let response = try await perform(request: request, timeout: operationTimeout(for: request))
+        let response = try await perform(
+            request: request,
+            timeout: operationTimeout(for: request),
+            onProgress: onProgress
+        )
         guard let result = response.operationResult else {
             throw DeviceFileSystemError.helperFailed("The Garmin helper did not return an operation result.")
         }
@@ -498,23 +606,56 @@ final class MTPHelperClient {
         return result
     }
 
-    private func uploadInChunks(_ files: [DeviceUploadFile]) async throws -> DeviceFileOperationResult {
+    private func uploadInChunks(
+        _ files: [DeviceUploadFile],
+        onProgress: MTPTransferProgressHandler?
+    ) async throws -> DeviceFileOperationResult {
         var completed = 0
         var failures: [String] = []
         let chunks = stride(from: 0, to: files.count, by: Self.uploadChunkSize).map {
             Array(files[$0..<min($0 + Self.uploadChunkSize, files.count)])
         }
+        let totalBytes = files.reduce(Int64(0)) { $0 + max(Self.fileSize(atPath: $1.localPath), 0) }
+        var completedBytes: Int64 = 0
 
-        for chunk in chunks {
+        for (chunkIndex, chunk) in chunks.enumerated() {
             try Task.checkCancellation()
+            let chunkBytes = chunk.reduce(Int64(0)) { $0 + max(Self.fileSize(atPath: $1.localPath), 0) }
+            let bytesBeforeChunk = completedBytes
             let request = MTPHelperRequest(operation: .upload, uploadFiles: chunk)
-            let response = try await perform(request: request, timeout: operationTimeout(for: request))
+            let response = try await perform(
+                request: request,
+                timeout: operationTimeout(for: request),
+                onProgress: { event in
+                    // Remap chunk-local fraction into overall multi-chunk progress.
+                    let overall: Double
+                    if totalBytes > 0 {
+                        let within = event.overallFraction * Double(chunkBytes)
+                        overall = min(1, max(0, (Double(bytesBeforeChunk) + within) / Double(totalBytes)))
+                    } else {
+                        overall = (Double(chunkIndex) + event.overallFraction) / Double(max(chunks.count, 1))
+                    }
+                    onProgress?(
+                        MTPProgressEvent(
+                            phase: event.phase,
+                            itemIndex: chunkIndex * Self.uploadChunkSize + event.itemIndex,
+                            itemCount: files.count,
+                            itemName: event.itemName,
+                            bytesTransferred: event.bytesTransferred,
+                            bytesTotal: event.bytesTotal,
+                            overallFraction: overall,
+                            message: event.message
+                        )
+                    )
+                }
+            )
             if let result = response.operationResult {
                 completed += result.completedCount
                 failures.append(contentsOf: result.failedItems)
             } else if !response.ok {
                 failures.append(contentsOf: chunk.map(\.displayName))
             }
+            completedBytes += chunkBytes
         }
 
         let message: String
@@ -587,7 +728,11 @@ final class MTPHelperClient {
         return ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)) ?? 0
     }
 
-    private func perform(request: MTPHelperRequest, timeout: TimeInterval) async throws -> MTPHelperResponse {
+    private func perform(
+        request: MTPHelperRequest,
+        timeout: TimeInterval,
+        onProgress: MTPTransferProgressHandler? = nil
+    ) async throws -> MTPHelperResponse {
         guard let transport else {
             throw DeviceFileSystemError.helperMissing
         }
@@ -597,20 +742,26 @@ final class MTPHelperClient {
         let requestData = try encoder.encode(request)
 
         return try await MTPOperationCoordinator.shared.perform {
-            try await self.performWithRetry(transport: transport, requestData: requestData, timeout: timeout)
+            try await self.performWithRetry(
+                transport: transport,
+                requestData: requestData,
+                timeout: timeout,
+                onProgress: onProgress
+            )
         }
     }
 
     private func performWithRetry(
         transport: MTPHelperTransport,
         requestData: Data,
-        timeout: TimeInterval
+        timeout: TimeInterval,
+        onProgress: MTPTransferProgressHandler?
     ) async throws -> MTPHelperResponse {
         var lastError: Error?
         for attempt in 1...MTPRetryPolicy.maxAttempts {
             try Task.checkCancellation()
             do {
-                let data = try await transport.send(requestData, timeout: timeout)
+                let data = try await transport.send(requestData, timeout: timeout, onProgress: onProgress)
                 return try Self.decodeResponse(from: data)
             } catch {
                 lastError = error
@@ -639,7 +790,12 @@ final class MTPHelperClient {
         decoder.dateDecodingStrategy = .iso8601
         let response: MTPHelperResponse
         do {
-            response = try decoder.decode(MTPHelperResponse.self, from: data)
+            if let streamLine = try? decoder.decode(MTPHelperStreamLine.self, from: data),
+               let fromStream = streamLine.asResponse {
+                response = fromStream
+            } else {
+                response = try decoder.decode(MTPHelperResponse.self, from: data)
+            }
         } catch {
             let prefix = String(decoding: data.prefix(300), as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)

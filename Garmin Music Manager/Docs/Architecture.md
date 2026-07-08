@@ -129,10 +129,26 @@ Sources/GarminMTPHelper/
 - Warn if Garmin Express or Android File Transfer may be holding the MTP device.
 - Idle-release the long-lived helper so other apps can claim the device.
 
+## Progress streaming
+
+Helper → app progress uses NDJSON **before** the final result line:
+
+```text
+{"progress":{"phase":"upload","itemIndex":0,"itemCount":3,"itemName":"a.mp3","bytesTransferred":1024,"bytesTotal":5000000,"overallFraction":0.05,"message":"…"}}
+{"progress":{…}}
+{"ok":true,"operationResult":{…}}
+```
+
+- libmtp `LIBMTP_progressfunc_t` drives per-byte updates during `Send_File` / `Get_File`
+- `MTPProgressReporter` throttles (~80ms / 1% delta) and always emits item start/finish
+- `PersistentMTPHelperTransport` reads lines until a final `ok`/result payload
+- `DeviceBrowserStore` + `SyncCoordinator` remap chunk-local fractions into overall plan progress
+- UI: determinate bars in the transfer panel and device operation banner
+
 ## Remaining roadmap
 
 - **Metadata editor** — lightweight tag repair sheet
 - **Playlist import** — Apple Music XML, `.m3u` files
 - **Signed/notarized packaging** — distribution-ready `.app` bundle
-- **MTP move** — copy-then-delete within a single helper session (partially done in app)
-- **Progress callbacks from helper** — per-byte upload progress over NDJSON events
+- **MTP move** — native in-place move when firmware supports it
+- **Cancel mid-file** — non-zero libmtp progress callback when Task is cancelled

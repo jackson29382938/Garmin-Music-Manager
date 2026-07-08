@@ -18,7 +18,20 @@ struct TransferPanelView: View {
             }
 
             if model.isSyncing {
-                ProgressView(value: model.syncProgress)
+                VStack(alignment: .leading, spacing: 4) {
+                    ProgressView(value: model.syncProgress)
+                    HStack {
+                        Text(model.transferLog.last ?? "Transferring…")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer()
+                        Text("\(Int((model.syncProgress * 100).rounded()))%")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
             }
 
             DisclosureGroup("Transfer log", isExpanded: $logExpanded) {

@@ -168,9 +168,13 @@ final class DeviceBrowserStore: ObservableObject {
     @discardableResult
     func copySelected(to destinationFolder: URL) async -> DeviceFileOperationResult? {
         guard let backend, !selectedFiles.isEmpty else { return nil }
-        operation = DeviceOperation(kind: .copy, phase: "Copying selected files", progress: nil)
+        operation = DeviceOperation(kind: .copy, phase: "Copying selected files", progress: 0, canCancel: backend.backendKind == .mtp)
         do {
-            let result = try await backend.download(selectedFiles, to: destinationFolder)
+            let result = try await backend.download(selectedFiles, to: destinationFolder, onProgress: { [weak self] event in
+                Task { @MainActor in
+                    self?.applyTransferProgress(event, kind: .copy)
+                }
+            })
             applyOperationResult(result, kind: .copy, successMessage: "Copy complete.")
             return result
         } catch {
@@ -183,12 +187,23 @@ final class DeviceBrowserStore: ObservableObject {
     func upload(
         _ uploadFiles: [DeviceUploadFile],
         syncSettings: SyncSettings? = nil,
-        refreshAfter: Bool = true
+        refreshAfter: Bool = true,
+        onProgress: MTPTransferProgressHandler? = nil
     ) async -> DeviceFileOperationResult? {
         guard let backend, !uploadFiles.isEmpty else { return nil }
-        operation = DeviceOperation(kind: .upload, phase: "Uploading files to Garmin", progress: nil, canCancel: backend.backendKind == .mtp)
+        operation = DeviceOperation(
+            kind: .upload,
+            phase: "Uploading files to Garmin",
+            progress: 0,
+            canCancel: backend.backendKind == .mtp
+        )
         do {
-            let result = try await backend.upload(uploadFiles, syncSettings: syncSettings)
+            let result = try await backend.upload(uploadFiles, syncSettings: syncSettings, onProgress: { [weak self] event in
+                onProgress?(event)
+                Task { @MainActor in
+                    self?.applyTransferProgress(event, kind: .upload)
+                }
+            })
             applyOperationResult(result, kind: .upload, successMessage: "Upload complete.")
             if refreshAfter {
                 await refresh(force: true)
@@ -200,6 +215,15 @@ final class DeviceBrowserStore: ObservableObject {
             applyOperationError(error, kind: .upload)
             return nil
         }
+    }
+
+    private func applyTransferProgress(_ event: MTPProgressEvent, kind: DeviceOperationKind) {
+        operation = DeviceOperation(
+            kind: kind,
+            phase: event.displayMessage,
+            progress: event.overallFraction,
+            canCancel: backendKind == .mtp
+        )
     }
 
     @discardableResult
@@ -259,7 +283,23 @@ final class DeviceBrowserStore: ObservableObject {
                 includingPropertiesForKeys: nil
             )) ?? [])
 
-            let downloadResult = try await backend.download(sourceFiles, to: tempFolder)
+            let downloadResult = try await backend.download(sourceFiles, to: tempFolder, onProgress: { [weak self] event in
+                Task { @MainActor in
+                    self?.applyTransferProgress(
+                        MTPProgressEvent(
+                            phase: "download",
+                            itemIndex: event.itemIndex,
+                            itemCount: event.itemCount,
+                            itemName: event.itemName,
+                            bytesTransferred: event.bytesTransferred,
+                            bytesTotal: event.bytesTotal,
+                            overallFraction: event.overallFraction * 0.5,
+                            message: event.message.map { "Move: \($0)" }
+                        ),
+                        kind: .move
+                    )
+                }
+            })
             failures.append(contentsOf: downloadResult.failedItems)
 
             var downloaded = downloadedFiles(in: tempFolder, excluding: before)
@@ -287,7 +327,23 @@ final class DeviceBrowserStore: ObservableObject {
             }
 
             if !uploadRequests.isEmpty {
-                let uploadResult = try await backend.upload(uploadRequests, syncSettings: nil)
+                let uploadResult = try await backend.upload(uploadRequests, syncSettings: nil, onProgress: { [weak self] event in
+                    Task { @MainActor in
+                        self?.applyTransferProgress(
+                            MTPProgressEvent(
+                                phase: "upload",
+                                itemIndex: event.itemIndex,
+                                itemCount: event.itemCount,
+                                itemName: event.itemName,
+                                bytesTransferred: event.bytesTransferred,
+                                bytesTotal: event.bytesTotal,
+                                overallFraction: 0.5 + event.overallFraction * 0.5,
+                                message: event.message.map { "Move: \($0)" }
+                            ),
+                            kind: .move
+                        )
+                    }
+                })
                 failures.append(contentsOf: uploadResult.failedItems)
                 let failedUploads = Set(uploadResult.failedItems)
                 for upload in uploadSources where !failedUploads.contains(upload.file.name) {

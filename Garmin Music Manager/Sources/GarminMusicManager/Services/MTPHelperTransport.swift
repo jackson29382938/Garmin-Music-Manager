@@ -1,10 +1,20 @@
 import Foundation
+import GarminMusicCore
 
 /// Sends an encoded `MTPHelperRequest` payload and returns the helper's raw
-/// response bytes. Abstracted so `MTPHelperClient` logic is testable without
-/// spawning the real helper subprocess.
+/// **final** response bytes. Progress events are delivered via `onProgress`.
 protocol MTPHelperTransport: Sendable {
-    func send(_ requestData: Data, timeout: TimeInterval) async throws -> Data
+    func send(
+        _ requestData: Data,
+        timeout: TimeInterval,
+        onProgress: (@Sendable (MTPProgressEvent) -> Void)?
+    ) async throws -> Data
+}
+
+extension MTPHelperTransport {
+    func send(_ requestData: Data, timeout: TimeInterval) async throws -> Data {
+        try await send(requestData, timeout: timeout, onProgress: nil)
+    }
 }
 
 // MARK: - Persistent (long-lived) helper
@@ -12,13 +22,11 @@ protocol MTPHelperTransport: Sendable {
 /// Keeps a single `GarminMTPHelper --serve` process warm so list/upload/delete
 /// share one MTP session. This is the primary production transport.
 ///
-/// Framing: one JSON object per line (NDJSON) on stdin/stdout of the helper.
-/// The process is restarted after crashes, idle timeout, or a broken pipe.
+/// Framing: NDJSON on stdin/stdout — zero or more `{"progress":...}` lines,
+/// then one final `{"ok":...}` response line.
 actor PersistentMTPHelperTransport: MTPHelperTransport {
     let helperURL: URL
-    /// Release the USB device when the app has been idle this long.
     var idleTimeout: TimeInterval = 90
-    /// Hard ceiling for how long a single request may wait for a response line.
     var defaultTimeoutFloor: TimeInterval = 15
 
     private var process: Process?
@@ -32,15 +40,14 @@ actor PersistentMTPHelperTransport: MTPHelperTransport {
         self.helperURL = helperURL
     }
 
-    // Note: no deinit cleanup — actor-isolated process handles cannot be
-    // touched from deinit. Call `shutdown()` from app reset / terminate, and
-    // rely on idle timeout + process exit otherwise.
-
-    func send(_ requestData: Data, timeout: TimeInterval) async throws -> Data {
+    func send(
+        _ requestData: Data,
+        timeout: TimeInterval,
+        onProgress: (@Sendable (MTPProgressEvent) -> Void)?
+    ) async throws -> Data {
         try Task.checkCancellation()
         try ensureProcessRunning()
 
-        // Write one request line.
         var line = requestData
         if line.last != 0x0A {
             line.append(0x0A)
@@ -63,13 +70,12 @@ actor PersistentMTPHelperTransport: MTPHelperTransport {
         scheduleIdleShutdown()
 
         let responseTimeout = max(timeout, defaultTimeoutFloor)
-        let data = try await readResponseLine(timeout: responseTimeout)
+        let data = try await readUntilFinalResponse(timeout: responseTimeout, onProgress: onProgress)
         lastUsed = Date()
         scheduleIdleShutdown()
         return data
     }
 
-    /// Force-stop the helper (e.g. on app reset or user cancel of all MTP work).
     func shutdown() {
         cancelIdleShutdown()
         terminateProcess()
@@ -152,50 +158,82 @@ actor PersistentMTPHelperTransport: MTPHelperTransport {
         terminateProcess()
     }
 
-    // MARK: Line reading
+    // MARK: Multi-line read (progress + final)
 
-    private func readResponseLine(timeout: TimeInterval) async throws -> Data {
-        if let line = popLineFromBuffer() {
-            return line
+    private func readUntilFinalResponse(
+        timeout: TimeInterval,
+        onProgress: (@Sendable (MTPProgressEvent) -> Void)?
+    ) async throws -> Data {
+        let deadline = Date().addingTimeInterval(timeout)
+
+        while true {
+            try Task.checkCancellation()
+
+            if Date() > deadline {
+                restartProcess()
+                throw DeviceFileSystemError.helperFailed("The Garmin helper timed out.")
+            }
+
+            if let line = popLineFromBuffer() {
+                if let final = try Self.interpretLine(line, onProgress: onProgress) {
+                    return final
+                }
+                // Progress only — keep reading.
+                lastUsed = Date()
+                continue
+            }
+
+            if let process, !process.isRunning {
+                if let line = popLineFromBuffer(), let final = try Self.interpretLine(line, onProgress: onProgress) {
+                    return final
+                }
+                restartProcess()
+                throw DeviceFileSystemError.helperFailed(
+                    "The Garmin helper exited before producing a response."
+                )
+            }
+
+            let remaining = deadline.timeIntervalSinceNow
+            let chunk = try await readAvailable(timeout: min(0.5, max(0.05, remaining)))
+            if chunk.isEmpty {
+                try await Task.sleep(nanoseconds: 20_000_000)
+                continue
+            }
+            readBuffer.append(chunk)
         }
+    }
 
-        guard let stdoutHandle else {
-            throw DeviceFileSystemError.helperFailed("The Garmin helper has no stdout pipe.")
-        }
-
-        let handle = stdoutHandle
-        let bufferBox = BufferBox(readBuffer)
-        // Clear actor-owned buffer; the worker owns the in-flight remainder.
-        readBuffer = Data()
-
+    /// Returns final response data, or nil if the line was progress-only.
+    private static func interpretLine(
+        _ line: Data,
+        onProgress: (@Sendable (MTPProgressEvent) -> Void)?
+    ) throws -> Data? {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let streamLine: MTPHelperStreamLine
         do {
-            let (line, remainder) = try await withThrowingTaskGroup(of: (Data, Data).self) { group in
-                group.addTask {
-                    try Self.readLineBlocking(from: handle, initial: bufferBox.data)
-                }
-                group.addTask {
-                    try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
-                    throw DeviceFileSystemError.helperFailed("The Garmin helper timed out.")
-                }
-                let first = try await group.next()!
-                group.cancelAll()
-                return first
-            }
-            readBuffer = remainder
-            return line
+            streamLine = try decoder.decode(MTPHelperStreamLine.self, from: line)
         } catch {
-            // Pull back any partial bytes the worker may have collected.
-            readBuffer = bufferBox.data
-            if (error as? DeviceFileSystemError).map({
-                if case .helperFailed(let message) = $0 { return message.contains("timed out") }
-                return false
-            }) ?? false {
-                restartProcess()
-            } else if let process, !process.isRunning {
-                restartProcess()
+            // Final responses historically may not include optional progress keys;
+            // raw line is still the final payload if it decodes as MTPHelperResponse.
+            if (try? decoder.decode(MTPHelperResponse.self, from: line)) != nil {
+                return line
             }
-            throw error
+            let prefix = String(decoding: line.prefix(200), as: UTF8.self)
+            throw DeviceFileSystemError.helperFailed(
+                "The Garmin helper returned an unreadable response (output: \(prefix))."
+            )
         }
+
+        if streamLine.isProgressOnly, let progress = streamLine.progress {
+            onProgress?(progress)
+            return nil
+        }
+        if streamLine.asResponse != nil {
+            return line
+        }
+        // Ambiguous but non-empty — treat as final.
+        return line
     }
 
     private func popLineFromBuffer() -> Data? {
@@ -206,61 +244,40 @@ actor PersistentMTPHelperTransport: MTPHelperTransport {
         return line
     }
 
-    /// Reads bytes until a newline, returning (lineWithoutNewline, leftoverAfterNewline).
-    private static func readLineBlocking(from handle: FileHandle, initial: Data) throws -> (Data, Data) {
-        var buffer = initial
-        if let newline = buffer.firstIndex(of: 0x0A) {
-            let line = Data(buffer[..<newline])
-            let next = buffer.index(after: newline)
-            return (line, Data(buffer[next...]))
-        }
-
-        while true {
-            try Task.checkCancellation()
-            let chunk = handle.availableData
-            if chunk.isEmpty {
-                // EOF or transient empty. If we have no newline yet, treat as failure.
-                if buffer.isEmpty {
-                    throw DeviceFileSystemError.helperFailed(
-                        "The Garmin helper exited before producing a response."
-                    )
-                }
-                // Return partial as line (one-shot style compatibility).
-                return (buffer, Data())
-            }
-            buffer.append(chunk)
-            if let newline = buffer.firstIndex(of: 0x0A) {
-                let line = Data(buffer[..<newline])
-                let next = buffer.index(after: newline)
-                return (line, Data(buffer[next...]))
-            }
-            if buffer.count > 32 * 1_024 * 1_024 {
-                throw DeviceFileSystemError.helperFailed("The Garmin helper response exceeded 32 MB.")
+    private func readAvailable(timeout: TimeInterval) async throws -> Data {
+        guard let stdoutHandle else { return Data() }
+        _ = timeout
+        let handle = stdoutHandle
+        return try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                continuation.resume(returning: handle.availableData)
             }
         }
-    }
-
-    /// Tiny box so the blocking reader and actor can hand off buffer ownership.
-    private final class BufferBox: @unchecked Sendable {
-        var data: Data
-        init(_ data: Data) { self.data = data }
     }
 }
 
 // MARK: - One-shot subprocess (legacy / tests)
 
-/// Runs the bundled `GarminMTPHelper` executable once per request.
-/// Kept for fallback and for cancellation tests that expect a short-lived process.
 struct SubprocessMTPHelperTransport: MTPHelperTransport {
     let helperURL: URL
 
-    func send(_ requestData: Data, timeout: TimeInterval) async throws -> Data {
+    func send(
+        _ requestData: Data,
+        timeout: TimeInterval,
+        onProgress: (@Sendable (MTPProgressEvent) -> Void)?
+    ) async throws -> Data {
         try Task.checkCancellation()
         let helperURL = self.helperURL
         let box = ProcessBox()
         return try await withTaskCancellationHandler {
             try await Task.detached(priority: .userInitiated) {
-                try Self.sendSync(helperURL: helperURL, requestData: requestData, timeout: timeout, box: box)
+                try Self.sendSync(
+                    helperURL: helperURL,
+                    requestData: requestData,
+                    timeout: timeout,
+                    box: box,
+                    onProgress: onProgress
+                )
             }.value
         } onCancel: {
             box.cancel()
@@ -305,26 +322,20 @@ struct SubprocessMTPHelperTransport: MTPHelperTransport {
         }
     }
 
-    private static func sendSync(helperURL: URL, requestData: Data, timeout: TimeInterval, box: ProcessBox) throws -> Data {
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("GarminMTPHelper-\(UUID().uuidString).json")
-        FileManager.default.createFile(
-            atPath: outputURL.path,
-            contents: nil,
-            attributes: [.posixPermissions: 0o600]
-        )
-        let outputHandle = try FileHandle(forWritingTo: outputURL)
-        defer {
-            try? outputHandle.close()
-            try? FileManager.default.removeItem(at: outputURL)
-        }
-
+    private static func sendSync(
+        helperURL: URL,
+        requestData: Data,
+        timeout: TimeInterval,
+        box: ProcessBox,
+        onProgress: (@Sendable (MTPProgressEvent) -> Void)?
+    ) throws -> Data {
+        let outputPipe = Pipe()
         let process = Process()
         process.executableURL = helperURL
 
         let inputPipe = Pipe()
         process.standardInput = inputPipe
-        process.standardOutput = outputHandle
+        process.standardOutput = outputPipe
         process.standardError = FileHandle.nullDevice
 
         let terminated = DispatchSemaphore(value: 0)
@@ -340,29 +351,65 @@ struct SubprocessMTPHelperTransport: MTPHelperTransport {
         try? inputPipe.fileHandleForWriting.write(contentsOf: requestData)
         try? inputPipe.fileHandleForWriting.close()
 
-        if terminated.wait(timeout: .now() + timeout) == .timedOut {
-            process.terminate()
-            if terminated.wait(timeout: .now() + 5) == .timedOut {
-                kill(process.processIdentifier, SIGKILL)
-                _ = terminated.wait(timeout: .now() + 2)
+        // Stream stdout while the process runs so progress arrives live.
+        let stdout = outputPipe.fileHandleForReading
+        var buffer = Data()
+        var finalLine: Data?
+        let deadline = Date().addingTimeInterval(timeout)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+
+        while finalLine == nil {
+            if box.isCancelled { throw CancellationError() }
+            if Date() > deadline {
+                ProcessBox.terminate(process)
+                throw DeviceFileSystemError.helperFailed("The Garmin helper timed out.")
             }
-            throw DeviceFileSystemError.helperFailed("The Garmin helper timed out.")
+
+            let chunk = stdout.availableData
+            if chunk.isEmpty {
+                if !process.isRunning { break }
+                Thread.sleep(forTimeInterval: 0.02)
+                continue
+            }
+            buffer.append(chunk)
+            while let newline = buffer.firstIndex(of: 0x0A) {
+                let line = Data(buffer[..<newline])
+                buffer = Data(buffer[buffer.index(after: newline)...])
+                if line.isEmpty { continue }
+                if let streamLine = try? decoder.decode(MTPHelperStreamLine.self, from: line),
+                   streamLine.isProgressOnly,
+                   let progress = streamLine.progress {
+                    onProgress?(progress)
+                    continue
+                }
+                finalLine = line
+                break
+            }
         }
 
-        process.waitUntilExit()
-
-        if box.isCancelled {
-            throw CancellationError()
+        if terminated.wait(timeout: .now() + 2) == .timedOut {
+            process.waitUntilExit()
         }
 
-        try outputHandle.synchronize()
-        let data = try Data(contentsOf: outputURL)
+        if box.isCancelled { throw CancellationError() }
 
-        if data.isEmpty, process.terminationStatus != 0 {
+        if let finalLine {
+            return finalLine
+        }
+
+        // No newline framing (older helper): use remaining buffer.
+        if !buffer.isEmpty {
+            return buffer
+        }
+
+        if process.terminationStatus != 0 {
             throw DeviceFileSystemError.helperFailed(
                 "The Garmin helper exited with status \(process.terminationStatus) before producing a response."
             )
         }
-        return data
+        throw DeviceFileSystemError.helperFailed(
+            "The Garmin helper exited with status \(process.terminationStatus) before producing a response."
+        )
     }
 }

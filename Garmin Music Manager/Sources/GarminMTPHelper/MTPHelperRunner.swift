@@ -11,11 +11,17 @@ final class MTPHelperRunner {
     private let dependencyStatus: MTPToolStatus
     private let reuseSession: Bool
     private var session: MTPDirectSession?
+    private var progressReporter: MTPProgressReporter?
 
     init(reuseSession: Bool, fileManager: FileManager = .default) {
         self.reuseSession = reuseSession
         self.fileManager = fileManager
         self.dependencyStatus = MTPDirectStatus.current(fileManager: fileManager)
+    }
+
+    func setProgressReporter(_ reporter: MTPProgressReporter?) {
+        progressReporter = reporter
+        session?.progressReporter = reporter
     }
 
     func closeSession() {
@@ -100,12 +106,13 @@ final class MTPHelperRunner {
     private func withSession<T>(_ body: (MTPDirectSession) throws -> T) throws -> T {
         if !reuseSession {
             let oneShot = try MTPDirectSession.open(fileManager: fileManager)
-            defer { /* release via deinit */ }
+            oneShot.progressReporter = progressReporter
             return try body(oneShot)
         }
 
         do {
             let active = try existingOrOpenSession()
+            active.progressReporter = progressReporter
             return try body(active)
         } catch {
             // Drop a half-dead session and retry once — common after USB glitches.
@@ -114,6 +121,7 @@ final class MTPHelperRunner {
                 throw error
             }
             let reopened = try existingOrOpenSession()
+            reopened.progressReporter = progressReporter
             return try body(reopened)
         }
     }
@@ -123,6 +131,7 @@ final class MTPHelperRunner {
             return session
         }
         let opened = try MTPDirectSession.open(fileManager: fileManager)
+        opened.progressReporter = progressReporter
         session = opened
         return opened
     }
@@ -136,7 +145,6 @@ final class MTPHelperRunner {
             let code = helperError.code.lowercased()
             if code == "device-busy" || code == "no-device" || code == "list-failed"
                 || code == "upload-failed" || code == "download-failed" || code == "delete-failed" {
-                // Only force-drop when diagnostics look like a dead USB session.
                 let detail = [helperError.message, helperError.diagnosticDetail ?? ""]
                     .joined(separator: " ")
                     .lowercased()

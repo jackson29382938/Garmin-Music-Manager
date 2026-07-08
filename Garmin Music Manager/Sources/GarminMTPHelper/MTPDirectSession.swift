@@ -15,6 +15,8 @@ final class MTPDirectSession {
     private var lastStorageResult: Int32?
     /// Folder tree is expensive on Garmin; cache across uploads within a session.
     private var cachedFolderIndex: MTPFolderIndex?
+    /// Optional NDJSON progress sink (set by the runner in serve/one-shot modes).
+    var progressReporter: MTPProgressReporter?
 
     private init(
         device: UnsafeMutablePointer<LIBMTP_mtpdevice_t>,
@@ -179,8 +181,11 @@ final class MTPDirectSession {
 
         var copied = 0
         var failures: [String] = []
+        let itemCount = files.count
+        let totalBatchBytes = files.reduce(Int64(0)) { $0 + max($1.size, 0) }
+        var completedBytes: Int64 = 0
 
-        for file in files {
+        for (index, file) in files.enumerated() {
             guard let objectID = UInt32(file.objectID ?? "") else {
                 failures.append(file.name)
                 continue
@@ -191,11 +196,42 @@ final class MTPDirectSession {
                 preferredFileName: sanitizedFileName(file.name, fallback: "Garmin Track")
             )
 
+            let itemBytes = max(file.size, 0)
+            progressReporter?.itemStarted(
+                phase: "download",
+                itemIndex: index,
+                itemCount: itemCount,
+                itemName: file.name,
+                bytesTotal: itemBytes > 0 ? itemBytes : nil,
+                completedBytesBeforeItem: completedBytes,
+                totalBatchBytes: totalBatchBytes
+            )
+
+            let bridge = progressReporter?.makeBridge(
+                phase: "download",
+                itemIndex: index,
+                itemCount: itemCount,
+                itemName: file.name,
+                itemBytes: itemBytes,
+                completedBytesBeforeItem: completedBytes,
+                totalBatchBytes: totalBatchBytes
+            )
+
             do {
                 try MTPRetryPolicy.runWithRetry {
-                    try self.downloadSingleFile(file, objectID: objectID, to: target)
+                    try self.downloadSingleFile(file, objectID: objectID, to: target, progressBridge: bridge)
                 }
                 copied += 1
+                completedBytes += itemBytes
+                progressReporter?.itemFinished(
+                    phase: "download",
+                    itemIndex: index,
+                    itemCount: itemCount,
+                    itemName: file.name,
+                    bytesTotal: itemBytes > 0 ? itemBytes : nil,
+                    completedBytesBeforeItem: completedBytes - itemBytes,
+                    totalBatchBytes: totalBatchBytes
+                )
             } catch {
                 failures.append(file.name)
             }
@@ -213,8 +249,13 @@ final class MTPDirectSession {
         var failures: [String] = []
         var successfulUploads: [MTPUploadedFile] = []
         var folderIndex = try folderIndexCached()
+        let itemCount = uploadFiles.count
+        let totalBatchBytes = uploadFiles.reduce(Int64(0)) { partial, file in
+            partial + max(fileSize(at: URL(fileURLWithPath: file.localPath)), 0)
+        }
+        var completedBytes: Int64 = 0
 
-        for uploadFile in uploadFiles {
+        for (index, uploadFile) in uploadFiles.enumerated() {
             let localURL = URL(fileURLWithPath: uploadFile.localPath)
             guard fileManager.fileExists(atPath: localURL.path), fileSize(at: localURL) > 0 else {
                 failures.append(uploadFile.displayName)
@@ -241,23 +282,54 @@ final class MTPDirectSession {
                 }
             }
 
+            progressReporter?.itemStarted(
+                phase: "upload",
+                itemIndex: index,
+                itemCount: itemCount,
+                itemName: uploadFile.displayName,
+                bytesTotal: expectedSize,
+                completedBytesBeforeItem: completedBytes,
+                totalBatchBytes: totalBatchBytes
+            )
+
+            let bridge = progressReporter?.makeBridge(
+                phase: "upload",
+                itemIndex: index,
+                itemCount: itemCount,
+                itemName: uploadFile.displayName,
+                itemBytes: expectedSize,
+                completedBytesBeforeItem: completedBytes,
+                totalBatchBytes: totalBatchBytes
+            )
+
             do {
                 var objectID: UInt32?
                 try MTPRetryPolicy.runWithRetry {
                     objectID = try self.uploadSingleFile(
                         uploadFile,
                         localURL: localURL,
-                        folderIndex: &folderIndex
+                        folderIndex: &folderIndex,
+                        progressBridge: bridge
                     )
                 }
                 cachedFolderIndex = folderIndex
                 uploaded += 1
+                completedBytes += expectedSize
                 successfulUploads.append(MTPUploadedFile(
                     displayName: uploadFile.displayName,
                     remotePath: expectedRemotePath,
                     size: expectedSize,
                     objectID: objectID
                 ))
+                progressReporter?.itemFinished(
+                    phase: "upload",
+                    itemIndex: index,
+                    itemCount: itemCount,
+                    itemName: uploadFile.displayName,
+                    bytesTotal: expectedSize,
+                    completedBytesBeforeItem: completedBytes - expectedSize,
+                    totalBatchBytes: totalBatchBytes
+                )
             } catch {
                 // Folder index may be stale after a mid-batch USB glitch.
                 cachedFolderIndex = folderIndex
@@ -527,14 +599,23 @@ final class MTPDirectSession {
         )
     }
 
-    private func downloadSingleFile(_ file: DeviceFile, objectID: UInt32, to target: URL) throws {
-        let result = target.path.withCString { targetPath in
-            LIBMTP_Get_File_To_File(device, objectID, targetPath, nil, nil)
+    private func downloadSingleFile(
+        _ file: DeviceFile,
+        objectID: UInt32,
+        to target: URL,
+        progressBridge: LibMTPProgressBridge?
+    ) throws {
+        let result = withProgress(progressBridge) { callback, data in
+            target.path.withCString { targetPath in
+                LIBMTP_Get_File_To_File(device, objectID, targetPath, callback, data)
+            }
         }
         let fallbackResult: Int32
         if result != 0, file.type == .audio {
-            fallbackResult = target.path.withCString { targetPath in
-                LIBMTP_Get_Track_To_File(device, objectID, targetPath, nil, nil)
+            fallbackResult = withProgress(progressBridge) { callback, data in
+                target.path.withCString { targetPath in
+                    LIBMTP_Get_Track_To_File(device, objectID, targetPath, callback, data)
+                }
             }
         } else {
             fallbackResult = result
@@ -556,7 +637,8 @@ final class MTPDirectSession {
     private func uploadSingleFile(
         _ uploadFile: DeviceUploadFile,
         localURL: URL,
-        folderIndex: inout MTPFolderIndex
+        folderIndex: inout MTPFolderIndex,
+        progressBridge: LibMTPProgressBridge?
     ) throws -> UInt32? {
         let remotePath = normalizedUploadPath(
             uploadFile.remotePath,
@@ -569,7 +651,8 @@ final class MTPDirectSession {
             uploadFile,
             localURL: localURL,
             remoteFileName: remoteFileName,
-            folder: folder
+            folder: folder,
+            progressBridge: progressBridge
         )
     }
 
@@ -578,7 +661,8 @@ final class MTPDirectSession {
         _ uploadFile: DeviceUploadFile,
         localURL: URL,
         remoteFileName: String,
-        folder: MTPFolderLocation
+        folder: MTPFolderLocation,
+        progressBridge: LibMTPProgressBridge?
     ) throws -> UInt32? {
         let fileType = fileType(forFileName: remoteFileName)
         let localSize = UInt64(max(fileSize(at: localURL), 0))
@@ -592,7 +676,8 @@ final class MTPDirectSession {
                 remoteFileName: remoteFileName,
                 folder: folder,
                 fileType: fileType,
-                fileSize: localSize
+                fileSize: localSize,
+                progressBridge: progressBridge
             )
         } catch {
             if isAudio(fileType, fileName: remoteFileName),
@@ -602,7 +687,8 @@ final class MTPDirectSession {
                     remoteFileName: remoteFileName,
                     folder: folder,
                     fileType: fileType,
-                    fileSize: localSize
+                    fileSize: localSize,
+                    progressBridge: progressBridge
                ) {
                 return trackID
             }
@@ -616,7 +702,8 @@ final class MTPDirectSession {
         remoteFileName: String,
         folder: MTPFolderLocation,
         fileType: LIBMTP_filetype_t,
-        fileSize: UInt64
+        fileSize: UInt64,
+        progressBridge: LibMTPProgressBridge?
     ) -> UInt32? {
         guard let track = LIBMTP_new_track_t() else {
             return nil
@@ -636,8 +723,10 @@ final class MTPDirectSession {
         track.pointee.filesize = fileSize
         track.pointee.filetype = fileType
 
-        let result = localURL.path.withCString { localPath in
-            LIBMTP_Send_Track_From_File(device, localPath, track, nil, nil)
+        let result = withProgress(progressBridge) { callback, data in
+            localURL.path.withCString { localPath in
+                LIBMTP_Send_Track_From_File(device, localPath, track, callback, data)
+            }
         }
         if result == 0 {
             let id = track.pointee.item_id
@@ -654,7 +743,8 @@ final class MTPDirectSession {
         remoteFileName: String,
         folder: MTPFolderLocation,
         fileType: LIBMTP_filetype_t,
-        fileSize: UInt64
+        fileSize: UInt64,
+        progressBridge: LibMTPProgressBridge?
     ) throws -> UInt32? {
         guard let file = LIBMTP_new_file_t() else {
             throw MTPHelperError(code: "upload-failed", message: "Could not allocate MTP upload metadata.")
@@ -667,8 +757,10 @@ final class MTPDirectSession {
         file.pointee.filesize = fileSize
         file.pointee.filetype = fileType
 
-        let result = localURL.path.withCString { localPath in
-            LIBMTP_Send_File_From_File(device, localPath, file, nil, nil)
+        let result = withProgress(progressBridge) { callback, data in
+            localURL.path.withCString { localPath in
+                LIBMTP_Send_File_From_File(device, localPath, file, callback, data)
+            }
         }
         guard result == 0 else {
             throw operationError(
@@ -679,6 +771,19 @@ final class MTPDirectSession {
         }
         let id = file.pointee.item_id
         return id == 0 ? nil : id
+    }
+
+    /// Holds the bridge alive for the duration of a libmtp call and passes the C trampoline.
+    private func withProgress(
+        _ bridge: LibMTPProgressBridge?,
+        body: (LIBMTP_progressfunc_t?, UnsafeRawPointer?) -> Int32
+    ) -> Int32 {
+        guard let bridge else {
+            return body(nil, nil)
+        }
+        let unmanaged = Unmanaged.passRetained(bridge)
+        defer { unmanaged.release() }
+        return body(libmtpProgressTrampoline, unmanaged.toOpaque())
     }
 
     private func verifyUploadedFiles(_ uploads: [MTPUploadedFile]) -> [String] {

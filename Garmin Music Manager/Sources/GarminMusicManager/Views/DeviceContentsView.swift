@@ -648,30 +648,47 @@ private struct OperationBanner: View {
     var onCancel: (() -> Void)?
 
     var body: some View {
-        HStack(spacing: 8) {
-            if operation.lastError == nil {
-                ProgressView()
-                    .controlSize(.small)
-            } else {
-                Image(systemName: "exclamationmark.triangle")
-                    .foregroundStyle(.orange)
-            }
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 8) {
+                if operation.lastError == nil {
+                    if operation.progress == nil {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    Image(systemName: "exclamationmark.triangle")
+                        .foregroundStyle(.orange)
+                }
 
-            VStack(alignment: .leading, spacing: 2) {
-                Text(operation.phase)
-                    .font(.caption.bold())
-                if let lastError = operation.lastError {
-                    Text(lastError)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(operation.phase)
+                        .font(.caption.bold())
                         .lineLimit(2)
+                    if let lastError = operation.lastError {
+                        Text(lastError)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    } else if let progress = operation.progress {
+                        Text("\(Int((progress * 100).rounded()))%")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                Spacer()
+
+                if operation.canCancel, operation.lastError == nil, let onCancel {
+                    Button("Cancel", action: onCancel)
+                        .controlSize(.small)
                 }
             }
 
-            Spacer()
-
-            if operation.canCancel, operation.lastError == nil, let onCancel {
-                Button("Cancel", action: onCancel)
+            if let progress = operation.progress, operation.lastError == nil {
+                ProgressView(value: progress)
                     .controlSize(.small)
             }
         }

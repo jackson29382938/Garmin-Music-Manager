@@ -5,9 +5,17 @@ import GarminMusicCore
 private struct FakeTransport: MTPHelperTransport {
     var result: Result<Data, Error>
     var onSend: (@Sendable (Data, TimeInterval) -> Void)?
+    var progressEvents: [MTPProgressEvent] = []
 
-    func send(_ requestData: Data, timeout: TimeInterval) async throws -> Data {
+    func send(
+        _ requestData: Data,
+        timeout: TimeInterval,
+        onProgress: (@Sendable (MTPProgressEvent) -> Void)?
+    ) async throws -> Data {
         onSend?(requestData, timeout)
+        for event in progressEvents {
+            onProgress?(event)
+        }
         return try result.get()
     }
 }
@@ -122,5 +130,59 @@ final class MTPHelperClientTests: XCTestCase {
             count: 500
         ))
         XCTAssertEqual(client.operationTimeout(for: many), 600, "delete timeout caps at 10 minutes")
+    }
+
+    func testProgressEventsAreForwardedBeforeResult() async throws {
+        let progress = MTPProgressEvent(
+            phase: "upload",
+            itemIndex: 0,
+            itemCount: 1,
+            itemName: "song.mp3",
+            bytesTransferred: 500,
+            bytesTotal: 1_000,
+            overallFraction: 0.5,
+            message: "Uploading 1/1: song.mp3"
+        )
+        let result = DeviceFileOperationResult(completedCount: 1, failedItems: [], message: "1 file(s) uploaded.")
+        let data = try encoded(MTPHelperResponse(ok: true, operationResult: result))
+        let client = MTPHelperClient(transport: FakeTransport(result: .success(data), progressEvents: [progress]))
+
+        let box = ProgressBox()
+        let decoded = try await client.operationResult(
+            request: MTPHelperRequest(operation: .upload),
+            onProgress: { event in box.append(event) }
+        )
+        XCTAssertEqual(decoded.completedCount, 1)
+        XCTAssertEqual(box.events, [progress])
+    }
+
+    func testStreamLineProgressDecodes() throws {
+        let event = MTPProgressEvent(
+            phase: "upload",
+            itemIndex: 2,
+            itemCount: 5,
+            itemName: "track.m4a",
+            bytesTransferred: 100,
+            bytesTotal: 400,
+            overallFraction: 0.45,
+            message: "Uploading 3/5: track.m4a"
+        )
+        let data = try MTPProgressLineEncoder.encode(event)
+        let decoder = JSONDecoder()
+        let line = try decoder.decode(MTPHelperStreamLine.self, from: data)
+        XCTAssertTrue(line.isProgressOnly)
+        XCTAssertEqual(line.progress, event)
+        XCTAssertNil(line.asResponse)
+    }
+}
+
+private final class ProgressBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var events: [MTPProgressEvent] = []
+
+    func append(_ event: MTPProgressEvent) {
+        lock.lock()
+        events.append(event)
+        lock.unlock()
     }
 }
