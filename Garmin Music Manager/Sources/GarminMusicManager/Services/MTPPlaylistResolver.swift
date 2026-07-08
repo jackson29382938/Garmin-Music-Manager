@@ -5,6 +5,8 @@ import GarminMusicCore
 enum MTPPlaylistResolver {
     /// Tracks from the plan that should appear on the playlist (skipped-as-identical
     /// and successfully transferred items), matched against a fresh device listing.
+    ///
+    /// `failedKeys` may contain display names and/or normalized remote paths.
     static func playlistTracks(
         plan: MTPSyncPlan,
         failedDisplayNames: Set<String>,
@@ -13,13 +15,19 @@ enum MTPPlaylistResolver {
         let index = pathIndex(deviceFiles)
         var result: [DeviceFile] = []
         var seenIDs = Set<String>()
+        let failedNormalized = Set(failedDisplayNames.map { MTPSyncPlanner.normalizePath($0) })
 
         for item in plan.items {
             switch item.action {
             case .skipIdentical:
                 break
             case .copy, .replace, .keepBoth:
-                if failedDisplayNames.contains(item.track.displayName) {
+                let pathKey = MTPSyncPlanner.normalizePath(item.targetRemotePath)
+                if failedDisplayNames.contains(item.track.displayName)
+                    || failedDisplayNames.contains(item.targetRemotePath)
+                    || failedNormalized.contains(pathKey)
+                    || (item.uploadFile.map { failedDisplayNames.contains($0.displayName) } ?? false)
+                {
                     continue
                 }
             }

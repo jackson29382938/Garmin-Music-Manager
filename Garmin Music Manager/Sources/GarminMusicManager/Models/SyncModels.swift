@@ -13,22 +13,40 @@ struct MTPSyncResult {
     let skippedCount: Int
     let replacedCount: Int
     let failedCount: Int
+    /// True when the owning Task was cancelled mid-transfer (remaining items not treated as failures).
+    let wasCancelled: Bool
     /// Native MTP playlist name when one was created successfully.
     let playlistName: String?
+    /// Remote paths (or display names) that failed to transfer.
+    let failedItems: [String]
 
     init(
         uploadedCount: Int,
         skippedCount: Int,
         replacedCount: Int,
         failedCount: Int,
-        playlistName: String? = nil
+        wasCancelled: Bool = false,
+        playlistName: String? = nil,
+        failedItems: [String] = []
     ) {
         self.uploadedCount = uploadedCount
         self.skippedCount = skippedCount
         self.replacedCount = replacedCount
         self.failedCount = failedCount
+        self.wasCancelled = wasCancelled
         self.playlistName = playlistName
+        self.failedItems = failedItems
     }
+}
+
+/// Result of preparing tracks for sync (optional ALAC/FLAC → AAC conversion).
+struct TrackPreparationResult {
+    let tracks: [AudioTrack]
+    /// Human-readable lines for tracks that still need conversion or failed to convert.
+    let conversionFailures: [String]
+    let convertedCount: Int
+
+    var hasConversionIssues: Bool { !conversionFailures.isEmpty }
 }
 
 struct SyncPreviewItem: Identifiable, Hashable {

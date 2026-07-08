@@ -8,26 +8,29 @@ import UniformTypeIdentifiers
 final class AppModel: ObservableObject {
     @Published var devices: [GarminDevice] = []
     @Published var connectedUSBDevices: [GarminUSBDevice] = []
-    @Published var mtpDependencyStatus = MTPDependencyStatus(homebrewURL: nil, libmtpLibraryURL: nil, libmtpHeaderURL: nil)
+    @Published var mtpDependencyStatus = MTPDependencyStatus.unavailable
     @Published var isInstallingMTPDependencies = false
     @Published var selectedDevice: GarminDevice?
     @Published var tracks: [AudioTrack] = []
-    @Published var deviceFiles: [DeviceAudioFile] = []
-    @Published var storageInfo: StorageInfo?
     @Published var transferLog: [String] = []
     @Published var isSyncing = false
     @Published var isScanning = false
     @Published var isManagingDeviceFiles = false
     @Published var syncProgress: Double = 0
-    @Published var playlistName: String
-    @Published var destinationMode: GarminDestinationMode
+    @Published var playlistName: String {
+        didSet { persistSettingsIfReady() }
+    }
+    @Published var destinationMode: GarminDestinationMode {
+        didSet { persistSettingsIfReady() }
+    }
     @Published var destinationOverride: URL?
     @Published var destinationWarning: String?
-    @Published var syncSettings: SyncSettings
+    @Published var syncSettings: SyncSettings {
+        didSet { persistSettingsIfReady() }
+    }
     @Published var searchText = ""
     @Published var showSyncPreview = false
     @Published var syncPreview: SyncPreview?
-    @Published var selectedDeviceFileIDs: Set<String> = []
     @Published var showDeleteConfirmation = false
     @Published var showResetConfirmation = false
     @Published var showMoveWithinGarminSheet = false
@@ -35,29 +38,27 @@ final class AppModel: ObservableObject {
     @Published var showMTPMoveDeleteConfirmation = false
     @Published var advancedStorageExplorerEnabled: Bool {
         didSet {
-            settingsStore.advancedStorageExplorerEnabled = advancedStorageExplorerEnabled
             if !advancedStorageExplorerEnabled {
                 deviceBrowser.setBrowseMode(.musicOnly, advancedEnabled: false)
-                settingsStore.lastDeviceBrowseMode = .musicOnly
                 Task { await deviceBrowser.refresh(force: false) }
             }
+            persistSettingsIfReady()
         }
     }
     @Published var destructiveConfirmationMode: DestructiveConfirmationMode {
-        didSet {
-            settingsStore.destructiveConfirmationMode = destructiveConfirmationMode
-        }
+        didSet { persistSettingsIfReady() }
     }
+
+    /// Suppresses auto-persist while `init` / reset assign multiple properties.
+    private var isPersistingSettings = false
+    private var settingsReady = false
 
     @Published var showAppleMusicBrowser = false
     @Published var musicLibrary: MusicLibrarySnapshot = .empty
     @Published var musicLibraryStatus: MusicLibraryStatus = .idle
 
     @Published var isBrowsingDevice = false
-    @Published var isMTPLibraryLoaded = false
-    @Published var devicePlaylists: [DevicePlaylist] = []
     @Published var connectedMTPDeviceName: String?
-    @Published var deviceBrowseMessage: String?
     @Published var deviceBrowser = DeviceBrowserStore()
 
     private var browseTask: Task<Void, Never>?
@@ -65,7 +66,7 @@ final class AppModel: ObservableObject {
     private var pendingMTPMoveOriginals: [DeviceFile] = []
     private let detector = DeviceDetector()
     private let scanner = MusicScanner()
-    private let syncCoordinator = SyncCoordinator()
+    private let syncSession = SyncSessionController()
     private let deviceLibraryCoordinator = DeviceLibraryCoordinator()
     private let deviceOperationsCoordinator = DeviceOperationsCoordinator()
     private let libraryImportCoordinator = LibraryImportCoordinator()
@@ -74,9 +75,20 @@ final class AppModel: ObservableObject {
     private let appleMusic = AppleMusicLibrary()
     private let transferLogStore = TransferLogStore()
     private let settingsStore: SettingsStore
-    private var syncTask: Task<Void, Never>?
     private var deviceBrowserCancellable: AnyCancellable?
     private var transferLogCancellable: AnyCancellable?
+
+    /// True when the device browser has loaded any MTP listing (files or collections).
+    var isMTPLibraryLoaded: Bool {
+        deviceBrowser.backendKind == .mtp
+            && (!deviceBrowser.files.isEmpty || !deviceBrowser.collections.isEmpty)
+    }
+
+    /// Convenience for views/log; backed by `deviceBrowser.statusMessage`.
+    var deviceBrowseMessage: String? {
+        get { deviceBrowser.statusMessage }
+        set { deviceBrowser.statusMessage = newValue }
+    }
 
     init(settingsStore: SettingsStore = SettingsStore(), autoRefresh: Bool = true) {
         self.settingsStore = settingsStore
@@ -100,6 +112,7 @@ final class AppModel: ObservableObject {
             self.objectWillChange.send()
         }
         self.mtpDependencyStatus = mtpDependencyManager.dependencyStatus()
+        self.settingsReady = true
         if autoRefresh {
             if let destination = destinationOverride {
                 refreshDeviceContents(at: destination)
@@ -341,11 +354,8 @@ final class AppModel: ObservableObject {
             connectedUSBDevices = result.1
             if connectedUSBDevices.isEmpty {
                 connectedMTPDeviceName = nil
-                isMTPLibraryLoaded = false
                 if activeDestination == nil {
                     deviceBrowser.clear(message: "Connect a Garmin over USB, then refresh to browse files on the watch.")
-                    syncLegacyDeviceSnapshot()
-                    deviceBrowseMessage = "Connect a Garmin over USB, then refresh to browse files on the watch."
                 }
             }
             if selectedDevice == nil || !devices.contains(where: { $0.id == selectedDevice?.id }) {
@@ -361,8 +371,8 @@ final class AppModel: ObservableObject {
                 if mtpDependencyStatus.isReady {
                     browseGarminMusicLibrary()
                 } else {
-                    deviceBrowseMessage = mtpDependencyStatus.message
                     deviceBrowser.statusMessage = mtpDependencyStatus.message
+                    appendLog(mtpDependencyStatus.message)
                 }
             } else if devices.isEmpty {
                 appendLog("Refreshed devices: no Garmin volume found and no Garmin USB/MTP device visible.")
@@ -377,8 +387,7 @@ final class AppModel: ObservableObject {
         destinationMode = .autoDetected
         destinationOverride = nil
         destinationWarning = nil
-        settingsStore.destinationMode = .autoDetected
-        settingsStore.saveDestination(nil)
+        persistSettingsIfReady(force: true)
         if let musicDir = device.bestMusicDirectory {
             configureMountedBrowser(destination: musicDir, displayName: device.volumeName)
             refreshDeviceContents(at: musicDir)
@@ -407,8 +416,8 @@ final class AppModel: ObservableObject {
         panel.canChooseFiles = false
 
         if panel.runModal() == .OK, let url = panel.url {
-            let urls = scanner.findAudioFiles(in: url)
-            Task { await addFiles(urls) }
+            // Folder expansion (including nested .m3u files) happens in `addFiles`.
+            Task { await addFiles([url]) }
         }
     }
 
@@ -430,29 +439,19 @@ final class AppModel: ObservableObject {
     }
 
     func importM3UPlaylist(from url: URL) async {
-        do {
-            let urls = try M3UImporter.localTrackURLs(from: url)
-            guard !urls.isEmpty else {
-                appendLog("No local tracks found in \(url.lastPathComponent). Remote/streaming entries are skipped.")
-                return
-            }
-            let name = url.deletingPathExtension().lastPathComponent
-            if !name.isEmpty {
-                playlistName = name
-            }
-            await addFiles(urls)
-            appendLog("Imported \(urls.count) track(s) from \(url.lastPathComponent).")
-        } catch {
-            appendLog("Playlist import failed: \(error.localizedDescription)")
+        let name = url.deletingPathExtension().lastPathComponent
+        if !name.isEmpty {
+            playlistName = name
         }
+        // Expansion + local-path filtering happens in `addFiles` / MusicScanner.
+        await addFiles([url])
     }
 
     func useAutoDetectedDestination() {
         destinationMode = .autoDetected
         destinationOverride = nil
         destinationWarning = nil
-        settingsStore.destinationMode = .autoDetected
-        settingsStore.saveDestination(nil)
+        persistSettingsIfReady(force: true)
 
         if let selectedDevice, let musicDir = selectedDevice.bestMusicDirectory {
             refreshDeviceContents(at: musicDir)
@@ -483,8 +482,7 @@ final class AppModel: ObservableObject {
         destinationMode = .customFolder
         destinationOverride = url
         destinationWarning = Self.customDestinationWarning(for: url)
-        settingsStore.destinationMode = .customFolder
-        settingsStore.saveDestination(url)
+        persistSettingsIfReady(force: true)
         configureMountedBrowser(destination: url, displayName: url.lastPathComponent)
         refreshDeviceContents(at: url)
         appendLog("Custom Garmin destination set: \(url.path)")
@@ -515,15 +513,26 @@ final class AppModel: ObservableObject {
         isScanning = true
         defer { isScanning = false }
 
-        let scanned = await scanner.scanFiles(urls)
+        let expansion = libraryImportCoordinator.expandImportURLs(urls)
+        guard !expansion.audioURLs.isEmpty else {
+            if expansion.playlistsExpanded > 0 {
+                appendLog("No local tracks found in the selected playlist(s). Remote/streaming entries are skipped.")
+            }
+            return
+        }
+
+        let scanned = await scanner.scanFiles(expansion.audioURLs)
         mergeTracks(scanned)
         updateDuplicateFlags()
-        appendLog("Added \(scanned.count) file(s). \(syncableTracks.count) selected and ready.")
+        var message = "Added \(scanned.count) file(s). \(syncableTracks.count) selected and ready."
+        if expansion.playlistsExpanded > 0 {
+            message += " Expanded \(expansion.playlistsExpanded) playlist file(s)."
+        }
+        appendLog(message)
     }
 
     func handleDroppedURLs(_ urls: [URL]) {
-        let fileURLs = libraryImportCoordinator.expandDroppedURLs(urls)
-        Task { await addFiles(fileURLs) }
+        Task { await addFiles(urls) }
     }
 
     func removeTracks(at offsets: IndexSet) {
@@ -556,15 +565,11 @@ final class AppModel: ObservableObject {
                 return
             }
             deviceBrowser.clear(message: "Connect a Garmin over USB or choose a destination folder to browse existing audio files.")
-            syncLegacyDeviceSnapshot()
-            deviceBrowseMessage = "Connect a Garmin over USB or choose a destination folder to browse existing audio files."
             return
         }
         configureMountedBrowser(destination: destination, displayName: selectedDevice?.volumeName ?? destination.lastPathComponent)
         Task {
             await deviceBrowser.refresh(force: true)
-            syncLegacyDeviceSnapshot()
-            deviceBrowseMessage = deviceBrowser.statusMessage
             updateDuplicateFlags()
         }
     }
@@ -586,29 +591,21 @@ final class AppModel: ObservableObject {
             appendLog("Nothing to sync. Add compatible selected files first.")
             return
         }
-        guard let destination = activeDestination else {
-            guard mtpDependencyStatus.isReady else {
-                appendLog(mtpDependencyStatus.message)
-                return
-            }
-            syncPreview = syncCoordinator.buildMTPPreview(
+        do {
+            syncPreview = try syncSession.buildPreview(
                 tracks: syncableTracks,
                 playlistName: playlistName,
                 settings: syncSettings,
-                deviceFiles: deviceBrowser.files
+                activeDestination: activeDestination,
+                deviceFiles: deviceBrowser.files,
+                mtpReady: mtpDependencyStatus.isReady
             )
             showSyncPreview = true
-            return
-        }
-
-        do {
-            syncPreview = try syncCoordinator.buildMountedPreview(
-                tracks: syncableTracks,
-                playlistName: playlistName,
-                destination: destination,
-                settings: syncSettings
-            )
-            showSyncPreview = true
+        } catch let error as SyncSessionError {
+            switch error {
+            case .mtpNotReady:
+                appendLog(mtpDependencyStatus.message)
+            }
         } catch {
             appendLog("Preview failed: \(error.localizedDescription)")
         }
@@ -620,11 +617,8 @@ final class AppModel: ObservableObject {
     }
 
     func cancelSync() {
-        syncTask?.cancel()
-        syncTask = nil
         isSyncing = false
-        // Mid-file abort: cooperative cancel inside the helper progress callback.
-        Task { await MTPHelperClient.cancelInFlightHelper() }
+        syncSession.cancel()
         appendLog("Sync cancelled.")
     }
 
@@ -645,125 +639,39 @@ final class AppModel: ObservableObject {
             appendLog("Nothing to sync.")
             return
         }
-        guard let destination = activeDestination else {
-            await syncToMTP()
-            return
-        }
 
-        syncTask?.cancel()
         isSyncing = true
         syncProgress = 0
-        settingsStore.playlistName = playlistName
-        settingsStore.syncSettings = syncSettings
-        settingsStore.saveDestination(destination)
-        appendLog("Starting sync to \(destination.path)")
+        persistSettingsIfReady(force: true)
 
-        syncTask = Task {
-            defer {
-                isSyncing = false
-                syncProgress = 1
-                syncTask = nil
-            }
-            do {
-                let result = try await syncCoordinator.syncMounted(
-                    tracks: syncableTracks,
-                    playlistName: playlistName,
-                    destination: destination,
-                    settings: syncSettings
-                ) { [weak self] progress, message in
-                    Task { @MainActor in
-                        self?.syncProgress = progress
-                        if let message { self?.appendLog(message) }
-                    }
-                }
-                appendLog("Sync complete: copied \(result.copiedCount), skipped \(result.skippedCount), replaced \(result.replacedCount).")
-                if syncSettings.writePlaylist {
-                    appendLog("Playlist: \(result.playlistURL.lastPathComponent)")
-                }
-                refreshDeviceContents(at: destination)
-            } catch is CancellationError {
-                appendLog("Sync cancelled.")
-            } catch {
-                appendLog("Sync failed: \(error.localizedDescription)")
-            }
-        }
-        await syncTask?.value
-    }
-
-    private func syncToMTP() async {
-        guard mtpDependencyStatus.isReady else {
-            appendLog(mtpDependencyStatus.message)
-            return
+        defer {
+            isSyncing = false
+            syncProgress = 1
         }
 
-        syncTask?.cancel()
-        isSyncing = true
-        syncProgress = 0
-        settingsStore.playlistName = playlistName
-        settingsStore.syncSettings = syncSettings
-        appendLog("Starting MTP sync to Garmin watch")
-
-        syncTask = Task {
-            defer {
-                isSyncing = false
-                syncProgress = 1
-                syncTask = nil
+        await syncSession.run(
+            tracks: syncableTracks,
+            playlistName: playlistName,
+            settings: syncSettings,
+            activeDestination: activeDestination,
+            mtpReady: mtpDependencyStatus.isReady,
+            mtpNotReadyMessage: mtpDependencyStatus.message,
+            deviceBrowser: deviceBrowser,
+            configureMTP: { [weak self] in self?.configureMTPBrowser() },
+            onProgress: { [weak self] progress, message in
+                self?.syncProgress = progress
+                if let message { self?.appendLog(message) }
+            },
+            onLog: { [weak self] message in
+                self?.appendLog(message)
+            },
+            onMountedComplete: { [weak self] destination in
+                self?.refreshDeviceContents(at: destination)
+            },
+            onMTPComplete: { [weak self] in
+                self?.applyPostMTPTransferUI(forceLibraryRefresh: false)
             }
-            do {
-                try Task.checkCancellation()
-                configureMTPBrowser()
-                syncProgress = 0.05
-                appendLog("Refreshing Garmin library before sync…")
-                await deviceBrowser.refresh(force: true)
-                try Task.checkCancellation()
-                syncLegacyDeviceSnapshot()
-
-                let preparedTracks = syncCoordinator.preparedTracks(syncableTracks, settings: syncSettings)
-                let plan = MTPSyncPlanner.buildPlan(
-                    tracks: preparedTracks,
-                    playlistName: playlistName,
-                    settings: syncSettings,
-                    deviceFiles: deviceBrowser.files
-                )
-
-                if plan.transferCount == 0 {
-                    appendLog("MTP sync complete: all \(plan.skippedCount) selected track(s) already on the Garmin.")
-                    syncProgress = 1
-                    browseGarminMusicLibrary()
-                    return
-                }
-
-                try Task.checkCancellation()
-                let result = await syncCoordinator.executeMTPPlan(
-                    plan,
-                    deviceBrowser: deviceBrowser,
-                    playlistName: playlistName,
-                    settings: syncSettings,
-                    refreshAfter: true
-                ) { [weak self] progress, message in
-                    Task { @MainActor in
-                        self?.syncProgress = progress
-                        if let message { self?.appendLog(message) }
-                    }
-                }
-
-                if result.failedCount > 0 {
-                    appendLog("MTP sync partially complete: sent \(result.uploadedCount), skipped \(result.skippedCount), replaced \(result.replacedCount), \(result.failedCount) failed.")
-                } else {
-                    appendLog("MTP sync complete: sent \(result.uploadedCount), skipped \(result.skippedCount), replaced \(result.replacedCount).")
-                }
-                if let playlistName = result.playlistName {
-                    appendLog("Playlist on Garmin: \(playlistName)")
-                }
-                // Library was already refreshed during the plan; avoid a second full MTP list.
-                applyPostMTPTransferUI(forceLibraryRefresh: false)
-            } catch is CancellationError {
-                appendLog("MTP sync cancelled.")
-            } catch {
-                appendLog("MTP sync failed: \(error.localizedDescription)")
-            }
-        }
-        await syncTask?.value
+        )
     }
 
     func installMTPDependencies() {
@@ -802,7 +710,6 @@ final class AppModel: ObservableObject {
             } else if let error = deviceBrowser.lastError {
                 appendLog("Delete failed: \(error)")
             }
-            syncLegacyDeviceSnapshot()
             updateDuplicateFlags()
         }
     }
@@ -884,7 +791,6 @@ final class AppModel: ObservableObject {
             } else if let error = deviceBrowser.lastError {
                 appendLog("Move failed: \(error)")
             }
-            syncLegacyDeviceSnapshot()
             updateDuplicateFlags()
         }
     }
@@ -904,7 +810,6 @@ final class AppModel: ObservableObject {
             } else if let error = deviceBrowser.lastError {
                 appendLog("Could not delete original files after MTP move: \(error)")
             }
-            syncLegacyDeviceSnapshot()
             updateDuplicateFlags()
         }
     }
@@ -951,7 +856,6 @@ final class AppModel: ObservableObject {
         browseTask?.cancel()
         configureMTPBrowser()
         isBrowsingDevice = true
-        deviceBrowseMessage = nil
         if force {
             appendLog("Loading Garmin music library over MTP…")
         }
@@ -973,9 +877,6 @@ final class AppModel: ObservableObject {
             browseGarminMusicLibrary(force: true)
             return
         }
-        syncLegacyDeviceSnapshot()
-        deviceBrowseMessage = deviceBrowser.statusMessage
-        isMTPLibraryLoaded = !deviceBrowser.files.isEmpty || !deviceBrowser.collections.isEmpty
         if let deviceName = deviceBrowser.deviceName {
             connectedMTPDeviceName = deviceName
         }
@@ -997,7 +898,6 @@ final class AppModel: ObservableObject {
         browseTask = Task {
             await deviceBrowser.refresh(force: false)
             guard !Task.isCancelled else { return }
-            syncLegacyDeviceSnapshot()
             updateDuplicateFlags()
         }
     }
@@ -1044,7 +944,6 @@ final class AppModel: ObservableObject {
             } else if let error = deviceBrowser.lastError {
                 appendLog("Upload failed: \(error)")
             }
-            syncLegacyDeviceSnapshot()
             updateDuplicateFlags()
         }
     }
@@ -1061,25 +960,21 @@ final class AppModel: ObservableObject {
         }
 
         isManagingDeviceFiles = true
-        let preparedTracks = syncCoordinator.preparedTracks(syncableTracks, settings: syncSettings)
+        let preparation = syncSession.prepareTracks(syncableTracks, settings: syncSettings)
+        logTrackPreparation(preparation)
         deviceFileTask = Task {
             defer { isManagingDeviceFiles = false }
 
             if deviceBrowser.backendKind == .mtp {
                 await deviceBrowser.refresh(force: true)
-                syncLegacyDeviceSnapshot()
                 let plan = MTPSyncPlanner.buildPlan(
-                    tracks: preparedTracks,
+                    tracks: preparation.tracks,
                     playlistName: playlistName,
                     settings: syncSettings,
                     deviceFiles: deviceBrowser.files
                 )
-                if plan.transferCount == 0 {
-                    appendLog("All selected track(s) are already on the Garmin.")
-                    updateDuplicateFlags()
-                    return
-                }
-                let result = await syncCoordinator.executeMTPPlan(
+                // Run executor even when transferCount == 0 so playlist rebuild still happens.
+                let result = await syncSession.executeMTPPlan(
                     plan,
                     deviceBrowser: deviceBrowser,
                     playlistName: playlistName,
@@ -1090,7 +985,11 @@ final class AppModel: ObservableObject {
                         if let message { self?.appendLog(message) }
                     }
                 }
-                if result.failedCount > 0 {
+                if result.wasCancelled {
+                    appendLog("Send cancelled after \(result.uploadedCount) track(s).")
+                } else if plan.transferCount == 0 {
+                    appendLog("All selected track(s) are already on the Garmin.")
+                } else if result.failedCount > 0 {
                     appendLog("Sent \(result.uploadedCount) track(s); skipped \(result.skippedCount); \(result.failedCount) failed.")
                 } else {
                     appendLog("Sent \(result.uploadedCount) track(s) to Garmin. Skipped \(result.skippedCount) identical file(s).")
@@ -1100,7 +999,7 @@ final class AppModel: ObservableObject {
                 }
             } else {
                 let uploadFiles = deviceOperationsCoordinator.makeUploadFiles(
-                    tracks: preparedTracks,
+                    tracks: preparation.tracks,
                     playlistName: playlistName,
                     settings: syncSettings,
                     backendKind: deviceBrowser.backendKind
@@ -1111,7 +1010,6 @@ final class AppModel: ObservableObject {
                     appendLog("Send to Garmin failed: \(error)")
                 }
             }
-            syncLegacyDeviceSnapshot()
             updateDuplicateFlags()
         }
     }
@@ -1187,10 +1085,11 @@ final class AppModel: ObservableObject {
     }
 
     func resetAppState() {
-        syncTask?.cancel()
+        syncSession.cancel()
         browseTask?.cancel()
-        syncTask = nil
         browseTask = nil
+        deviceFileTask?.cancel()
+        deviceFileTask = nil
         isSyncing = false
         isScanning = false
         isManagingDeviceFiles = false
@@ -1202,14 +1101,10 @@ final class AppModel: ObservableObject {
         musicLibrary = .empty
         musicLibraryStatus = .idle
         showAppleMusicBrowser = false
-        selectedDeviceFileIDs.removeAll()
+        deviceBrowser.selectedFileIDs.removeAll()
         devices.removeAll()
         connectedUSBDevices.removeAll()
         selectedDevice = nil
-        deviceFiles.removeAll()
-        devicePlaylists.removeAll()
-        storageInfo = nil
-        isMTPLibraryLoaded = false
         connectedMTPDeviceName = nil
         moveTargetPath = ""
         pendingMTPMoveOriginals.removeAll()
@@ -1219,8 +1114,10 @@ final class AppModel: ObservableObject {
         destinationOverride = nil
         destinationWarning = nil
         settingsStore.resetAppState()
+        settingsReady = false
         playlistName = settingsStore.playlistName
         syncSettings = settingsStore.syncSettings
+        settingsReady = true
         deviceBrowser.clear(message: "App state reset. Refresh or choose a Garmin destination to start again.")
         transferLogStore.clear()
         transferLog = []
@@ -1230,6 +1127,15 @@ final class AppModel: ObservableObject {
     }
 
     func saveSettings() {
+        persistSettingsIfReady(force: true)
+    }
+
+    private func persistSettingsIfReady(force: Bool = false) {
+        guard settingsReady || force else { return }
+        guard !isPersistingSettings else { return }
+        isPersistingSettings = true
+        defer { isPersistingSettings = false }
+
         settingsStore.playlistName = playlistName
         settingsStore.syncSettings = syncSettings
         settingsStore.advancedStorageExplorerEnabled = advancedStorageExplorerEnabled
@@ -1259,6 +1165,16 @@ final class AppModel: ObservableObject {
     private func appendLog(_ message: String) {
         transferLogStore.append(message)
         transferLog = transferLogStore.lines
+    }
+
+    /// Logs conversion outcomes so missing ffmpeg / failed encodes are never silent.
+    private func logTrackPreparation(_ preparation: TrackPreparationResult) {
+        if preparation.convertedCount > 0 {
+            appendLog("Converted \(preparation.convertedCount) track(s) to AAC for Garmin.")
+        }
+        for failure in preparation.conversionFailures {
+            appendLog(failure)
+        }
     }
 
     private func configureMountedBrowser(destination: URL, displayName: String) {
@@ -1293,17 +1209,6 @@ final class AppModel: ObservableObject {
         )
     }
 
-    private func syncLegacyDeviceSnapshot() {
-        let snapshot = deviceLibraryCoordinator.syncLegacyDeviceSnapshot(
-            from: deviceBrowser,
-            activeDestination: activeDestination
-        )
-        deviceFiles = snapshot.deviceFiles
-        devicePlaylists = snapshot.devicePlaylists
-        storageInfo = snapshot.storageInfo
-        selectedDeviceFileIDs = snapshot.selectedDeviceFileIDs
-        deviceBrowseMessage = snapshot.deviceBrowseMessage
-    }
 
     private func shouldConfirmDelete(files: [DeviceFile]) -> Bool {
         deviceOperationsCoordinator.shouldConfirmDelete(

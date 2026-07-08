@@ -647,6 +647,7 @@ final class MTPHelperClient {
             Array(files[$0..<min($0 + Self.uploadChunkSize, files.count)])
         }
         let totalBytes = files.reduce(Int64(0)) { $0 + max(Self.fileSize(atPath: $1.localPath), 0) }
+        /// Only bytes from successful (or proportionally successful) chunks.
         var completedBytes: Int64 = 0
 
         for (chunkIndex, chunk) in chunks.enumerated() {
@@ -683,10 +684,26 @@ final class MTPHelperClient {
             if let result = response.operationResult {
                 completed += result.completedCount
                 failures.append(contentsOf: result.failedItems)
+
+                let failedNames = Set(result.failedItems)
+                if failedNames.isEmpty, result.completedCount >= chunk.count {
+                    completedBytes += chunkBytes
+                } else {
+                    let succeeded = chunk.filter { !failedNames.contains($0.displayName) }
+                    if !succeeded.isEmpty {
+                        completedBytes += succeeded.reduce(Int64(0)) {
+                            $0 + max(Self.fileSize(atPath: $1.localPath), 0)
+                        }
+                    } else if result.completedCount > 0, chunk.count > 0 {
+                        let ratio = min(1, max(0, Double(result.completedCount) / Double(chunk.count)))
+                        completedBytes += Int64(Double(chunkBytes) * ratio)
+                    }
+                    // Total failure: no byte credit.
+                }
             } else if !response.ok {
                 failures.append(contentsOf: chunk.map(\.displayName))
+                // No byte credit on hard failure.
             }
-            completedBytes += chunkBytes
         }
 
         let message: String
@@ -846,7 +863,8 @@ final class MTPHelperClient {
         return response
     }
 
-    private static func locateHelper() -> URL? {
+    /// Resolves the `GarminMTPHelper` binary for packaged apps and SwiftPM builds.
+    static func locateHelper() -> URL? {
         if let bundled = Bundle.main.url(forAuxiliaryExecutable: "GarminMTPHelper") {
             return bundled
         }
@@ -861,6 +879,7 @@ final class MTPHelperClient {
         let currentDirectory = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         candidates.append(currentDirectory.appendingPathComponent(".build/debug/GarminMTPHelper"))
         candidates.append(currentDirectory.appendingPathComponent(".build/release/GarminMTPHelper"))
+        candidates.append(currentDirectory.appendingPathComponent("dist/Garmin Music Manager.app/Contents/MacOS/GarminMTPHelper"))
 
         return candidates.first { FileManager.default.isExecutableFile(atPath: $0.path) }
     }
