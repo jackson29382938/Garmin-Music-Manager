@@ -3,43 +3,19 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
     @State private var mode: AppMode = .transfer
+    @StateObject private var guidedSession = GuidedTransferSession()
 
     private var showsStickyProgress: Bool {
-        model.isSyncing || model.isManagingDeviceFiles
+        // Guided wizard has its own progress panel.
+        guard mode != .guided else { return false }
+        return model.isSyncing || model.isManagingDeviceFiles
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            modePicker
+        HStack(spacing: 0) {
+            leftRail
             Divider()
-
-            if showsStickyProgress {
-                StickyTransferProgressBar()
-                Divider()
-            }
-
-            if let notice = model.userNotice {
-                UserNoticeBanner(
-                    notice: notice,
-                    onAction: { model.performNoticeAction() },
-                    onDismiss: { model.dismissNotice() }
-                )
-                .padding(.horizontal, 16)
-                .padding(.top, 10)
-            }
-
-            Group {
-                switch mode {
-                case .transfer:
-                    TransferHomeView()
-                case .onWatch:
-                    OnWatchView()
-                case .settings:
-                    SettingsView()
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                }
-            }
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            mainColumn
         }
         .onAppear {
             if model.librarySettings.rememberLastAppMode,
@@ -48,6 +24,9 @@ struct ContentView: View {
             }
         }
         .onChange(of: mode) { _, newMode in
+            if newMode != .guided, guidedSession.step != .transferProgress {
+                guidedSession.cancelAnalysisOnly()
+            }
             guard model.librarySettings.rememberLastAppMode else { return }
             var lib = model.librarySettings
             lib.lastAppMode = newMode.rawValue
@@ -119,13 +98,6 @@ struct ContentView: View {
         } message: {
             Text("The files were copied to the new Garmin folder. Delete the original copies to complete the move.")
         }
-        .onChange(of: mode) { _, newMode in
-            if newMode == .onWatch {
-                if model.canAttemptMTP && !model.deviceBrowser.isConfigured {
-                    model.browseGarminMusicLibrary()
-                }
-            }
-        }
         .onChange(of: model.shouldFocusOnWatch) { _, focus in
             guard focus else { return }
             mode = .onWatch
@@ -145,31 +117,117 @@ struct ContentView: View {
         }
     }
 
-    private var modePicker: some View {
-        HStack(spacing: 16) {
+    // MARK: - Left rail
+
+    private var leftRail: some View {
+        VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 AppLogoMark(size: 22)
                 Text("Garmin Music")
                     .font(.headline)
                     .lineLimit(1)
             }
+            .padding(.horizontal, 4)
 
-            Picker("Mode", selection: $mode) {
-                ForEach(AppMode.allCases) { appMode in
-                    Label(appMode.title, systemImage: appMode.systemImage)
-                        .tag(appMode)
+            // Prominent Guided Transfer entry
+            Button {
+                mode = .guided
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: "sparkles.rectangle.stack.fill")
+                        .font(.title3)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Guided Transfer")
+                            .font(.subheadline.weight(.semibold))
+                        Text("Simple step-by-step")
+                            .font(.caption2)
+                            .opacity(0.85)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .foregroundStyle(mode == .guided ? Color.white : AppTheme.garminTint)
+                .padding(12)
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(mode == .guided ? AppTheme.garminTint : AppTheme.garminTint.opacity(0.12))
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(AppTheme.garminTint.opacity(mode == .guided ? 0 : 0.35), lineWidth: 1.5)
                 }
             }
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 420)
+            .buttonStyle(.plain)
+            .keyboardShortcut("g", modifiers: [.command, .shift])
+            .help("Open Guided Transfer wizard (⌘⇧G)")
+            .accessibilityLabel("Guided Transfer")
+            .accessibilityHint("Opens a simple step-by-step music transfer wizard")
 
-            Spacer(minLength: 0)
+            Divider()
+
+            ForEach([AppMode.transfer, .onWatch, .settings], id: \.id) { appMode in
+                Button {
+                    mode = appMode
+                } label: {
+                    Label(appMode.shortTitle, systemImage: appMode.systemImage)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.vertical, 8)
+                        .padding(.horizontal, 10)
+                        .background(
+                            mode == appMode
+                                ? Color.primary.opacity(0.08)
+                                : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        )
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(mode == appMode ? .primary : .secondary)
+                .accessibilityAddTraits(mode == appMode ? .isSelected : [])
+            }
+
+            Spacer()
 
             connectionPill
+                .padding(.horizontal, 4)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(12)
+        .frame(width: 200)
         .background(.bar)
+    }
+
+    private var mainColumn: some View {
+        VStack(spacing: 0) {
+            if showsStickyProgress {
+                StickyTransferProgressBar()
+                Divider()
+            }
+
+            if mode != .guided, let notice = model.userNotice {
+                UserNoticeBanner(
+                    notice: notice,
+                    onAction: { model.performNoticeAction() },
+                    onDismiss: { model.dismissNotice() }
+                )
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+            }
+
+            Group {
+                switch mode {
+                case .guided:
+                    GuidedTransferWizardView(session: guidedSession) {
+                        mode = .transfer
+                    }
+                case .transfer:
+                    TransferHomeView()
+                case .onWatch:
+                    OnWatchView()
+                case .settings:
+                    SettingsView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
     }
 
     private var connectionPill: some View {
@@ -181,11 +239,8 @@ struct ContentView: View {
             Text(connectionPillText)
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.secondary)
-                .lineLimit(1)
+                .lineLimit(2)
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(Color.primary.opacity(0.05), in: Capsule())
         .help(model.destinationDescription)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Connection: \(connectionPillText)")
@@ -214,7 +269,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - Sheets shared with On Watch
+// MARK: - Sheets
 
 private struct MoveWithinGarminSheet: View {
     @EnvironmentObject private var model: AppModel
@@ -242,18 +297,18 @@ private struct MoveWithinGarminSheet: View {
             TextField("Garmin folder path", text: $targetPath)
                 .textFieldStyle(.roundedBorder)
 
-            ViewThatFits(in: .horizontal) {
-                HStack {
-                    Spacer()
-                    cancelButton
-                    moveButton
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                    model.showMoveWithinGarminSheet = false
                 }
-
-                VStack(alignment: .trailing, spacing: 8) {
-                    cancelButton
-                    moveButton
+                Button("Move") {
+                    dismiss()
+                    model.moveSelectedWithinGarmin(to: targetPath)
                 }
-                .frame(maxWidth: .infinity, alignment: .trailing)
+                .buttonStyle(.borderedProminent)
+                .disabled(targetPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
         }
         .padding()
@@ -262,20 +317,6 @@ private struct MoveWithinGarminSheet: View {
             targetPath = model.moveTargetPath
         }
     }
-
-    private var cancelButton: some View {
-        Button("Cancel") {
-            dismiss()
-            model.showMoveWithinGarminSheet = false
-        }
-    }
-
-    private var moveButton: some View {
-        Button("Move") {
-            dismiss()
-            model.moveSelectedWithinGarmin(to: targetPath)
-        }
-        .buttonStyle(.borderedProminent)
-        .disabled(targetPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-    }
 }
+
+

@@ -11,9 +11,10 @@
   - `DeviceOperationsCoordinator` — pure helpers (upload builders, delete policy, paths)
   - `LibraryImportCoordinator` — expand folders/playlists + merge helpers (used by MacLibrarySession)
   - `TransferLogStore` — capped transfer log
-- `Views/` — simplified shell: **Transfer** / **On Watch** / **Settings**
-  - `ContentView` — mode picker, **global** `UserNoticeBanner`, sticky progress while sending, sheets
-  - `TransferHomeView` — connection recovery, import cards, queue, Send, full activity log
+- `Views/` — left rail: **Guided Transfer** / **Transfer** / **On Watch** / **Settings**
+  - `ContentView` — left navigation, global notices, sticky progress, sheets
+  - `GuidedTransfer/` — beginner wizard (`GuidedTransferWizardView` + `GuidedTransferSession`)
+  - `TransferHomeView` — advanced Transfer happy path
   - `OnWatchView` + `DeviceContentsView` — device file manager (direct add = no playlist)
   - `SettingsView` — sync policies, destination, MTP install, performance, browser options
   - `SyncPreviewSheet` / `AppleMusicBrowserView` — modal flows

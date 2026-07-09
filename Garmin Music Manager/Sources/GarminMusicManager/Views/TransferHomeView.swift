@@ -16,11 +16,9 @@ struct TransferHomeView: View {
 
                 if model.tracks.isEmpty {
                     emptyDropZone
-                }
-
-                importSection
-
-                if !model.tracks.isEmpty {
+                } else {
+                    // Compact “add more” once the queue has tracks.
+                    importSection
                     queueSection
                 }
 
@@ -223,22 +221,71 @@ struct TransferHomeView: View {
     // MARK: - Empty drop zone
 
     private var emptyDropZone: some View {
-        VStack(spacing: 10) {
-            Image(systemName: "square.and.arrow.down")
-                .font(.title)
-                .foregroundStyle(AppTheme.garminTint.opacity(0.8))
-            Text("Drop audio files here")
-                .font(.headline)
-            Text("Or use Apple Music / Files below")
+        VStack(spacing: 18) {
+            Image(systemName: "music.note.list")
+                .font(.system(size: 40))
+                .foregroundStyle(AppTheme.macTint.opacity(0.85))
+
+            VStack(spacing: 6) {
+                Text("Add music from your Mac")
+                    .font(.title3.bold())
+                Text("Files stay here until you send. Browse Apple Music for playlists, albums, and songs — or add local files.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .frame(maxWidth: 420)
+            }
+
+            // Primary: open Music.app library browser (playlists / albums / tracks).
+            Button {
+                model.openAppleMusicBrowser()
+            } label: {
+                Label("Browse Apple Music…", systemImage: "music.note.list")
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: 320)
+                    .padding(.vertical, 6)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(AppTheme.macTint)
+            .controlSize(.large)
+            .help("Open Music.app playlists and albums; import local non-DRM tracks into the queue")
+
+            HStack(spacing: 12) {
+                Button {
+                    model.chooseMusicFiles()
+                } label: {
+                    Label("Add Files", systemImage: "plus")
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    model.chooseMusicFolder()
+                } label: {
+                    Label("Add Folder", systemImage: "folder.badge.plus")
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    model.chooseM3UPlaylist()
+                } label: {
+                    Label("M3U", systemImage: "list.bullet.rectangle")
+                }
+                .buttonStyle(.bordered)
+                .help("Import local tracks listed in an .m3u / .m3u8 file")
+            }
+            .controlSize(.regular)
+
+            Text("You can also drop audio files onto this page")
                 .font(.caption)
-                .foregroundStyle(.secondary)
+                .foregroundStyle(.tertiary)
         }
         .frame(maxWidth: .infinity)
         .padding(.vertical, 28)
+        .padding(.horizontal, 20)
         .background(
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(AppTheme.garminTint.opacity(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [8, 6]))
-                .background(AppTheme.garminTint.opacity(0.04), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .strokeBorder(AppTheme.macTint.opacity(0.35), style: StrokeStyle(lineWidth: 1.5, dash: [8, 6]))
+                .background(AppTheme.macTint.opacity(0.05), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         )
     }
 
@@ -246,13 +293,13 @@ struct TransferHomeView: View {
 
     private var importSection: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text("What do you want on your watch?")
-                .font(.title2.bold())
+            Text("Add more music")
+                .font(.title3.bold())
 
             HStack(spacing: 12) {
                 importCard(
                     title: "Apple Music",
-                    subtitle: "Playlists & albums from Music.app",
+                    subtitle: "Playlists, albums & songs from Music.app",
                     systemImage: "music.note.list",
                     tint: AppTheme.macTint
                 ) {

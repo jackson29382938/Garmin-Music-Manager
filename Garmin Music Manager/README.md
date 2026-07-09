@@ -4,7 +4,8 @@ A native macOS SwiftUI app for managing local music files on Garmin music watche
 
 ## Features
 
-- **Simple shell:** Transfer · On Watch · Settings (primary **Send to Watch** action)
+- **Guided Transfer wizard** — left-rail step-by-step flow (pair → direction → plan → confirm → progress → summary)
+- **Advanced shell:** Transfer · On Watch · Settings (primary **Send to Watch** action)
 - **Device detection** — `/Volumes` Garmin mounts + USB/MTP (vendor `0x091e`) via libmtp
 - **Fast MTP path** — long-lived `GarminMTPHelper --serve`; chunked uploads, retries, live progress, mid-file cancel
 - **Partial cancel recovery** — successes kept on the watch; **Retry / continue send** covers failed + not-yet-attempted tracks
@@ -54,7 +55,8 @@ Sources/
     ├── Services/          — detector, MTP transport/client, planner, convert
     ├── Stores/            — DeviceBrowserStore
     ├── Persistence/       — SettingsStore, LibraryQueueStore
-    ├── Views/             — Transfer / On Watch / Settings shell
+    ├── Views/             — left rail: Guided / Transfer / On Watch / Settings
+    │   ├── GuidedTransfer/ — step-by-step wizard
     │   └── DeviceBrowser/ — toolbar + chrome for device file manager
     └── Utilities/
 Tests/GarminMusicManagerTests/
