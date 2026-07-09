@@ -22,6 +22,9 @@ public struct MTPHelperRequest: Codable, Hashable {
     public var browseMode: DeviceBrowseMode
     /// Playlist display name for `.createPlaylist`.
     public var playlistName: String?
+    /// When true, `listMusic` downloads on-device `.m3u`/`.m3u8` bodies to build
+    /// file-based playlist collections. Expensive on Garmin; default false.
+    public var includePlaylistContents: Bool
 
     public init(
         operation: MTPHelperOperation,
@@ -29,7 +32,8 @@ public struct MTPHelperRequest: Codable, Hashable {
         uploadFiles: [DeviceUploadFile] = [],
         destinationPath: String? = nil,
         browseMode: DeviceBrowseMode = .musicOnly,
-        playlistName: String? = nil
+        playlistName: String? = nil,
+        includePlaylistContents: Bool = false
     ) {
         self.operation = operation
         self.files = files
@@ -37,6 +41,18 @@ public struct MTPHelperRequest: Codable, Hashable {
         self.destinationPath = destinationPath
         self.browseMode = browseMode
         self.playlistName = playlistName
+        self.includePlaylistContents = includePlaylistContents
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        operation = try container.decode(MTPHelperOperation.self, forKey: .operation)
+        files = try container.decodeIfPresent([DeviceFile].self, forKey: .files) ?? []
+        uploadFiles = try container.decodeIfPresent([DeviceUploadFile].self, forKey: .uploadFiles) ?? []
+        destinationPath = try container.decodeIfPresent(String.self, forKey: .destinationPath)
+        browseMode = try container.decodeIfPresent(DeviceBrowseMode.self, forKey: .browseMode) ?? .musicOnly
+        playlistName = try container.decodeIfPresent(String.self, forKey: .playlistName)
+        includePlaylistContents = try container.decodeIfPresent(Bool.self, forKey: .includePlaylistContents) ?? false
     }
 }
 

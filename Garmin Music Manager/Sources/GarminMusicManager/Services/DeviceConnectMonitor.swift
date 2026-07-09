@@ -87,8 +87,7 @@ final class DeviceConnectMonitor {
 
     /// Lightweight USB identity string (vendor/product/serial) without full refresh cost.
     private func currentUSBSignature() -> String {
-        // Reuse the same profiler path DeviceDetector uses; cheap enough at 6s.
-        let devices = DeviceDetector().findConnectedGarminUSBDevices()
-        return devices.map(\.dedupeKey).sorted().joined(separator: "\n")
+        // IORegistry-only — avoids multi-second system_profiler on every poll tick.
+        DeviceDetector().connectedGarminUSBSignature()
     }
 }

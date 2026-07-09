@@ -50,15 +50,27 @@ final class SyncCoordinator {
 
         if plan.transferCount == 0 && uploads.isEmpty {
             progress(0.85, settings.writePlaylist ? "Building playlist…" : nil)
+            let preSync = deviceBrowser.files
+            let canSkipList = MTPPlaylistResolver.canResolveWithoutRefresh(
+                plan: plan,
+                failedDisplayNames: [],
+                deviceFiles: preSync,
+                uploadedObjects: []
+            )
             let playlist = await maybeCreateMTPPlaylist(
                 plan: plan,
                 failedRemotePaths: [],
                 deviceBrowser: deviceBrowser,
                 playlistName: playlistName,
                 settings: settings,
-                refreshFirst: true,
+                preSyncDeviceFiles: preSync,
+                uploadedObjects: [],
+                refreshFirst: !canSkipList && settings.writePlaylist,
                 progress: progress
             )
+            if refreshAfter {
+                await deviceBrowser.refresh(force: true)
+            }
             progress(1, playlist.map { "Playlist “\($0)” ready." })
             return MTPSyncResult(
                 uploadedCount: 0,
@@ -94,9 +106,12 @@ final class SyncCoordinator {
         let totalBytes = max(plan.totalBytesToTransfer, 1)
         var completed = 0
         var failedItems: [String] = []
+        var uploadedObjects: [DeviceUploadedObject] = []
         /// Bytes known to have finished successfully (not speculative chunk totals).
         var completedBytes: Int64 = 0
         var wasCancelled = false
+        /// Pre-sync listing used for skip-identical object IDs (avoids a post-list).
+        let preSyncDeviceFiles = deviceBrowser.files
 
         let transferBase = 0.08
         let transferSpan = settings.writePlaylist ? 0.78 : 0.88
@@ -132,6 +147,7 @@ final class SyncCoordinator {
 
                 completed += uploadResult.completedCount
                 failedItems.append(contentsOf: uploadResult.failedItems)
+                uploadedObjects.append(contentsOf: uploadResult.uploadedFiles)
 
                 // Advance by successfully transferred bytes only. If the helper
                 // reports partial success, estimate success share from counts.
@@ -163,6 +179,7 @@ final class SyncCoordinator {
             return false
         }
         let failedRemotePaths = Set(failedPlanItems.map { MTPSyncPlanner.normalizePath($0.targetRemotePath) })
+        let failedKeys = failedRemotePaths.union(failedNames)
         let failedTrackIDs = failedPlanItems.map(\.track.id)
         let replacedCount = plan.items.filter { item in
             guard item.action == .replace else { return false }
@@ -189,21 +206,30 @@ final class SyncCoordinator {
             )
         }
 
-        progress(0.90, "Refreshing Garmin library…")
-        await deviceBrowser.refresh(force: true)
+        // Prefer object IDs from this transfer + the pre-sync listing so we can
+        // build a native playlist without a multi-minute full re-list.
+        let canSkipList = MTPPlaylistResolver.canResolveWithoutRefresh(
+            plan: plan,
+            failedDisplayNames: failedKeys,
+            deviceFiles: preSyncDeviceFiles,
+            uploadedObjects: uploadedObjects
+        )
 
         let playlist = await maybeCreateMTPPlaylist(
             plan: plan,
-            failedRemotePaths: failedRemotePaths.union(failedNames),
+            failedRemotePaths: failedKeys,
             deviceBrowser: deviceBrowser,
             playlistName: playlistName,
             settings: settings,
-            refreshFirst: false,
+            preSyncDeviceFiles: preSyncDeviceFiles,
+            uploadedObjects: uploadedObjects,
+            refreshFirst: !canSkipList && settings.writePlaylist,
             progress: progress
         )
 
-        if refreshAfter, playlist != nil {
-            // Pull playlist collection into the browser after create/update.
+        // At most one UI refresh after the transfer (optional).
+        if refreshAfter {
+            progress(0.98, "Updating device browser…")
             await deviceBrowser.refresh(force: true)
         }
 
@@ -227,6 +253,8 @@ final class SyncCoordinator {
         deviceBrowser: DeviceBrowserStore,
         playlistName: String,
         settings: SyncSettings,
+        preSyncDeviceFiles: [DeviceFile] = [],
+        uploadedObjects: [DeviceUploadedObject] = [],
         refreshFirst: Bool,
         progress: @escaping @Sendable (Double, String?) -> Void
     ) async -> String? {
@@ -234,14 +262,28 @@ final class SyncCoordinator {
         guard deviceBrowser.backendKind == .mtp else { return nil }
 
         if refreshFirst {
+            progress(0.90, "Refreshing Garmin library…")
             await deviceBrowser.refresh(force: true)
         }
 
-        let tracks = MTPPlaylistResolver.playlistTracks(
+        let listing = refreshFirst ? deviceBrowser.files : preSyncDeviceFiles
+        var tracks = MTPPlaylistResolver.playlistTracks(
             plan: plan,
             failedDisplayNames: failedRemotePaths,
-            deviceFiles: deviceBrowser.files
+            deviceFiles: listing,
+            uploadedObjects: uploadedObjects
         )
+        // Last resort: if we still cannot resolve and have not refreshed, try once.
+        if tracks.isEmpty, !refreshFirst {
+            progress(0.90, "Refreshing Garmin library…")
+            await deviceBrowser.refresh(force: true)
+            tracks = MTPPlaylistResolver.playlistTracks(
+                plan: plan,
+                failedDisplayNames: failedRemotePaths,
+                deviceFiles: deviceBrowser.files,
+                uploadedObjects: uploadedObjects
+            )
+        }
         guard !tracks.isEmpty else {
             progress(0.96, "Playlist skipped (no matching tracks on the Garmin yet).")
             return nil

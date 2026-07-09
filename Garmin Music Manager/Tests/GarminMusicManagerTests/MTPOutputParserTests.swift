@@ -103,6 +103,66 @@ final class MTPOutputParserTests: XCTestCase {
         XCTAssertEqual(song.type, .audio)
     }
 
+    func testGenericObjectsInsideMusicFolderAreShownAsAudio() throws {
+        let files = """
+        File ID: 1
+        Filename: Music
+        File size 0
+        Filetype: Association/Directory
+
+        File ID: 2
+        Filename: Road Mix
+        File size 0
+        Parent ID: 1
+        Filetype: Association/Directory
+
+        File ID: 3
+        Filename: GarminTrack001
+        File size 4096
+        Parent ID: 2
+        Filetype: Unknown file type
+        """
+
+        let snapshot = try MTPOutputParser.makeMusicSnapshot(
+            tracksOutput: nil,
+            filesOutput: files,
+            playlistsOutput: nil
+        )
+
+        let song = try XCTUnwrap(snapshot.files.first { $0.name == "GarminTrack001" })
+        XCTAssertEqual(song.path, "Music/Road Mix/GarminTrack001")
+        XCTAssertEqual(song.type, .audio)
+    }
+
+    func testNonAudioSidecarsInsideMusicFolderStayOutOfMusicSnapshot() throws {
+        let files = """
+        File ID: 1
+        Filename: Music
+        File size 0
+        Filetype: Association/Directory
+
+        File ID: 2
+        Filename: cover.jpg
+        File size 4096
+        Parent ID: 1
+        Filetype: Unknown file type
+
+        File ID: 3
+        Filename: library.db
+        File size 4096
+        Parent ID: 1
+        Filetype: Unknown file type
+        """
+
+        let snapshot = try MTPOutputParser.makeMusicSnapshot(
+            tracksOutput: nil,
+            filesOutput: files,
+            playlistsOutput: nil
+        )
+
+        XCTAssertTrue(snapshot.files.isEmpty)
+    }
+
     func testNoDeviceOutputThrowsHelpfulError() {
         XCTAssertThrowsError(try MTPOutputParser.validateMTPOutput("No raw devices found.", allowNoPlaylists: false)) { error in
             let helperError = error as? MTPHelperError

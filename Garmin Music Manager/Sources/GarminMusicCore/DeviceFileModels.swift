@@ -209,15 +209,52 @@ public struct DeviceUploadFile: Codable, Hashable {
     }
 }
 
+/// One successfully uploaded object, as reported by the helper.
+/// Used to build native playlists without a full post-sync library re-list.
+public struct DeviceUploadedObject: Codable, Hashable {
+    public var displayName: String
+    public var remotePath: String
+    public var size: Int64
+    public var objectID: String?
+
+    public init(
+        displayName: String,
+        remotePath: String,
+        size: Int64,
+        objectID: String? = nil
+    ) {
+        self.displayName = displayName
+        self.remotePath = remotePath
+        self.size = size
+        self.objectID = objectID
+    }
+}
+
 public struct DeviceFileOperationResult: Codable, Hashable {
     public var completedCount: Int
     public var failedItems: [String]
     public var message: String?
+    /// Populated for upload operations when the helper returns object IDs.
+    public var uploadedFiles: [DeviceUploadedObject]
 
-    public init(completedCount: Int, failedItems: [String] = [], message: String? = nil) {
+    public init(
+        completedCount: Int,
+        failedItems: [String] = [],
+        message: String? = nil,
+        uploadedFiles: [DeviceUploadedObject] = []
+    ) {
         self.completedCount = completedCount
         self.failedItems = failedItems
         self.message = message
+        self.uploadedFiles = uploadedFiles
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        completedCount = try container.decode(Int.self, forKey: .completedCount)
+        failedItems = try container.decodeIfPresent([String].self, forKey: .failedItems) ?? []
+        message = try container.decodeIfPresent(String.self, forKey: .message)
+        uploadedFiles = try container.decodeIfPresent([DeviceUploadedObject].self, forKey: .uploadedFiles) ?? []
     }
 }
 

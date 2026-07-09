@@ -45,12 +45,29 @@ final class MTPHelperClientTests: XCTestCase {
     }
 
     func testOperationResultDecodesFromTransportData() async throws {
-        let result = DeviceFileOperationResult(completedCount: 3, failedItems: ["bad.mp3"], message: "3 file(s) uploaded; 1 failed.")
+        let result = DeviceFileOperationResult(
+            completedCount: 3,
+            failedItems: ["bad.mp3"],
+            message: "3 file(s) uploaded; 1 failed.",
+            uploadedFiles: [
+                DeviceUploadedObject(displayName: "good.mp3", remotePath: "Music/good.mp3", size: 123, objectID: "42")
+            ]
+        )
         let data = try encoded(MTPHelperResponse(ok: true, operationResult: result))
         let client = MTPHelperClient(transport: FakeTransport(result: .success(data)))
 
         let decoded = try await client.operationResult(request: MTPHelperRequest(operation: .upload))
         XCTAssertEqual(decoded, result)
+        XCTAssertEqual(decoded.uploadedFiles.first?.objectID, "42")
+    }
+
+    func testOperationResultDecodesLegacyPayloadWithoutUploadedFiles() throws {
+        let json = """
+        {"completedCount":1,"failedItems":[],"message":"1 file(s) uploaded."}
+        """.data(using: .utf8)!
+        let decoded = try JSONDecoder().decode(DeviceFileOperationResult.self, from: json)
+        XCTAssertEqual(decoded.completedCount, 1)
+        XCTAssertTrue(decoded.uploadedFiles.isEmpty)
     }
 
     func testHelperErrorResponseThrowsMatchingError() async throws {

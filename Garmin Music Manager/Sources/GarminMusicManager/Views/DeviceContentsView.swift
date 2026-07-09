@@ -46,7 +46,7 @@ struct DeviceContentsView: View {
                 loadingState
             } else if browser.files.isEmpty {
                 emptyState(
-                    title: browser.browseMode == .advancedStorage ? "No files found" : "No music on watch yet",
+                    title: emptyBrowserTitle,
                     message: browser.statusMessage ?? (browser.backendKind == .mtp
                         ? "Sync a playlist below, or drop tracks here to add directly."
                         : "Drop tracks here or use Add to Garmin.")
@@ -76,6 +76,16 @@ struct DeviceContentsView: View {
         .onDrop(of: [.fileURL], isTargeted: $isUploadDropTarget) { providers in
             handleUploadDrop(providers)
         }
+    }
+
+    private var emptyBrowserTitle: String {
+        if browser.browseMode == .advancedStorage {
+            return "No files found"
+        }
+        if browser.backendKind == .mtp {
+            return "No manageable music files found"
+        }
+        return "No music files found"
     }
 
     @ViewBuilder

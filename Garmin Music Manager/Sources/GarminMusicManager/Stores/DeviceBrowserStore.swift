@@ -20,11 +20,21 @@ final class DeviceBrowserStore: ObservableObject {
     @Published var statusMessage: String?
     @Published var deviceName: String?
 
+    /// Listings fresher than this can be reused for MTP sync planning without a forced re-list.
+    static let freshListingTTL: TimeInterval = 120
+
     private var backend: DeviceFileSystem?
     private var cache: [CacheKey: DeviceFileSystemSnapshot] = [:]
+    private var lastSuccessfulRefresh: Date?
 
     var backendKind: DeviceBackendKind? {
         backend?.backendKind
+    }
+
+    /// True when the in-memory device file list is non-empty and recently refreshed.
+    var hasFreshListing: Bool {
+        guard !files.isEmpty, let lastSuccessfulRefresh else { return false }
+        return Date().timeIntervalSince(lastSuccessfulRefresh) < Self.freshListingTTL
     }
 
     var isConfigured: Bool {
@@ -105,6 +115,7 @@ final class DeviceBrowserStore: ObservableObject {
         lastError = nil
         statusMessage = message
         deviceName = nil
+        lastSuccessfulRefresh = nil
     }
 
     func setBrowseMode(_ mode: DeviceBrowseMode, advancedEnabled: Bool) {
@@ -448,6 +459,7 @@ final class DeviceBrowserStore: ObservableObject {
         deviceName = snapshot.deviceName ?? deviceName
         statusMessage = snapshot.diagnosticMessage
         lastError = nil
+        lastSuccessfulRefresh = Date()
 
         let validIDs = Set(files.map(\.id))
         selectedFileIDs = selectedFileIDs.intersection(validIDs)

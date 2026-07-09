@@ -15,6 +15,10 @@ final class MTPDirectSession {
     private var lastStorageResult: Int32?
     /// Folder tree is expensive on Garmin; cache across uploads within a session.
     private var cachedFolderIndex: MTPFolderIndex?
+    /// Full music listing is very expensive; reuse within a warm session until a write.
+    private var cachedMusicSnapshot: DeviceFileSystemSnapshot?
+    /// Whether `cachedMusicSnapshot` included on-device M3U body downloads.
+    private var cachedMusicSnapshotIncludesPlaylistContents = false
     /// Optional NDJSON progress sink (set by the runner in serve/one-shot modes).
     var progressReporter: MTPProgressReporter?
 
@@ -72,7 +76,13 @@ final class MTPDirectSession {
             )
         }
 
-        guard let opened = LIBMTP_Open_Raw_Device_Uncached(rawDevices.advanced(by: selected.index)) else {
+        // Prefer cached open. On Garmin watches (e.g. Forerunner 955 + libmtp 1.1.x),
+        // Open_Raw_Device_Uncached often returns a live session whose Get_Filelisting /
+        // Get_Tracklisting are empty, while the cached open returns the full library.
+        let rawPointer = rawDevices.advanced(by: selected.index)
+        let opened = LIBMTP_Open_Raw_Device(rawPointer)
+            ?? LIBMTP_Open_Raw_Device_Uncached(rawPointer)
+        guard let opened else {
             throw busyError(rawDevice: selected, details: [])
         }
 
@@ -89,25 +99,43 @@ final class MTPDirectSession {
         )
     }
 
-    func musicSnapshot() throws -> DeviceFileSystemSnapshot {
+    func musicSnapshot(includePlaylistContents: Bool = false) throws -> DeviceFileSystemSnapshot {
+        // Reuse a warm-session listing when it already has at least the detail level requested.
+        if let cachedMusicSnapshot,
+           cachedMusicSnapshotIncludesPlaylistContents || !includePlaylistContents {
+            return cachedMusicSnapshot
+        }
+
         refreshStorage()
         let fileRecords = try loadFileRecords()
         let pathsByID = buildPathsByID(from: fileRecords)
-        let tracksByID = Dictionary(uniqueKeysWithValues: loadTrackRecords().map { ($0.id, $0) })
+        let trackRecords = loadTrackRecords()
+        let tracksByID = Dictionary(trackRecords.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let playlistRecords = loadPlaylistRecords()
+        let playlistTrackIDs = Set(playlistRecords.flatMap(\.trackIDs))
 
         var seenObjectIDs: Set<UInt32> = []
         var files = fileRecords.compactMap { record -> DeviceFile? in
-            guard isAudio(record.fileType, fileName: record.name) else { return nil }
+            let path = pathsByID[record.id] ?? record.name
+            guard shouldExposeAsMusic(record, path: path, playlistTrackIDs: playlistTrackIDs) else { return nil }
             seenObjectIDs.insert(record.id)
             return deviceFile(
                 from: record,
-                path: pathsByID[record.id] ?? record.name,
-                metadata: tracksByID[record.id]?.metadata
+                path: path,
+                metadata: tracksByID[record.id]?.metadata,
+                typeOverride: .audio
             )
         }
 
         for track in tracksByID.values where !seenObjectIDs.contains(track.id) {
             files.append(deviceFile(from: track, pathsByID: pathsByID))
+        }
+
+        let knownFileIDs = Set(files.compactMap { file in
+            file.objectID.flatMap(UInt32.init)
+        })
+        for trackID in playlistTrackIDs.subtracting(knownFileIDs).sorted() {
+            files.append(placeholderPlaylistFile(trackID: trackID, playlists: playlistRecords))
         }
 
         files.sort {
@@ -116,24 +144,51 @@ final class MTPDirectSession {
             return lhsPath.localizedCaseInsensitiveCompare(rhsPath) == .orderedAscending
         }
 
+        // On-device .m3u/.m3u8 downloads are expensive over MTP; skip unless requested.
+        let m3uCollections: [DeviceCollection]
+        if includePlaylistContents {
+            m3uCollections = loadM3UPlaylistCollections(
+                from: fileRecords,
+                audioFiles: files
+            )
+        } else {
+            m3uCollections = []
+        }
+
         let collections = musicCollections(
             for: files,
-            playlists: loadPlaylistRecords(),
+            playlists: playlistRecords,
+            m3uPlaylists: m3uCollections,
             knownFileIDs: Set(files.map(\.id))
         )
 
         let info = storageInfo(files: files)
+        let playlistCollectionCount = collections.filter { $0.kind == .playlist }.count
         let messages = [
-            files.isEmpty ? "No compatible audio files were found on the Garmin." : nil,
+            musicDiagnostic(
+                files: files,
+                rawFileCount: fileRecords.count,
+                trackCount: trackRecords.count,
+                playlistCount: max(playlistRecords.count, playlistCollectionCount),
+                playlistTrackCount: playlistTrackIDs.count
+            ),
             storageDiagnostic(info)
         ].compactMap { $0 }
-        return DeviceFileSystemSnapshot(
+        let snapshot = DeviceFileSystemSnapshot(
             files: files,
             collections: collections,
             storageInfo: info,
             deviceName: deviceDisplayName(),
             diagnosticMessage: messages.isEmpty ? nil : messages.joined(separator: " ")
         )
+        cachedMusicSnapshot = snapshot
+        cachedMusicSnapshotIncludesPlaylistContents = includePlaylistContents
+        return snapshot
+    }
+
+    private func invalidateListingCaches() {
+        cachedMusicSnapshot = nil
+        cachedMusicSnapshotIncludesPlaylistContents = false
     }
 
     func storageSnapshot() throws -> DeviceFileSystemSnapshot {
@@ -344,15 +399,34 @@ final class MTPDirectSession {
         // Prefer per-object metadata checks (cheap). Full re-list is a last resort
         // and was a major source of multi-minute stalls after large batches.
         let verificationFailures = verifyUploadedFiles(successfulUploads)
-        if !verificationFailures.isEmpty {
+        let verifiedUploads: [MTPUploadedFile]
+        if verificationFailures.isEmpty {
+            verifiedUploads = successfulUploads
+        } else {
+            let failedNames = Set(verificationFailures)
             failures.append(contentsOf: verificationFailures)
             uploaded = max(0, uploaded - verificationFailures.count)
+            verifiedUploads = successfulUploads.filter { !failedNames.contains($0.displayName) }
+        }
+
+        if uploaded > 0 {
+            invalidateListingCaches()
+        }
+
+        let uploadedObjects = verifiedUploads.map { upload in
+            DeviceUploadedObject(
+                displayName: upload.displayName,
+                remotePath: upload.remotePath,
+                size: upload.size,
+                objectID: upload.objectID.map(String.init)
+            )
         }
 
         return DeviceFileOperationResult(
             completedCount: uploaded,
             failedItems: failures,
-            message: resultMessage(action: "uploaded", count: uploaded, failures: failures.count)
+            message: resultMessage(action: "uploaded", count: uploaded, failures: failures.count),
+            uploadedFiles: uploadedObjects
         )
     }
 
@@ -379,6 +453,7 @@ final class MTPDirectSession {
         if deleted > 0 {
             // Deleted objects may have been folders; rebuild on next upload.
             cachedFolderIndex = nil
+            invalidateListingCaches()
         }
 
         return DeviceFileOperationResult(
@@ -418,6 +493,8 @@ final class MTPDirectSession {
         let action = try MTPRetryPolicy.runWithRetry {
             try self.createOrUpdatePlaylistOnce(name: playlistName, trackIDs: trackIDs)
         }
+
+        invalidateListingCaches()
 
         let verb = action == .updated ? "Updated" : "Created"
         return DeviceFileOperationResult(
@@ -556,7 +633,8 @@ final class MTPDirectSession {
     }
 
     private func loadFileRecords() throws -> [MTPFileRecord] {
-        guard let head = LIBMTP_Get_Filelisting(device) else {
+        // With_Callback variant is the supported API; NULL progress matches Get_Filelisting.
+        guard let head = LIBMTP_Get_Filelisting_With_Callback(device, nil, nil) else {
             let errors = drainErrorStack()
             if errors.isEmpty { return [] }
             throw operationError(
@@ -589,7 +667,7 @@ final class MTPDirectSession {
     }
 
     private func loadTrackRecords() -> [MTPTrackRecord] {
-        guard let head = LIBMTP_Get_Tracklisting(device) else {
+        guard let head = LIBMTP_Get_Tracklisting_With_Callback(device, nil, nil) else {
             _ = drainErrorStack()
             return []
         }
@@ -1021,6 +1099,16 @@ final class MTPDirectSession {
             Self.rootFolderID: ""
         ]
 
+        // Folder list carries full paths; seed the map so file parents resolve to
+        // Music/Artist/Album/... instead of basename-only on Garmin devices.
+        for folder in loadFolderRecords() {
+            if !folder.path.isEmpty {
+                memo[folder.id] = folder.path
+            } else if !folder.name.isEmpty {
+                memo[folder.id] = folder.name
+            }
+        }
+
         func resolve(_ id: UInt32, visiting: Set<UInt32> = []) -> String {
             if let cached = memo[id] {
                 return cached
@@ -1046,12 +1134,13 @@ final class MTPDirectSession {
     private func deviceFile(
         from record: MTPFileRecord,
         path: String,
-        metadata: DeviceAudioMetadata?
+        metadata: DeviceAudioMetadata?,
+        typeOverride: DeviceFileType? = nil
     ) -> DeviceFile {
         DeviceFile(
             objectID: String(record.id),
             name: record.name,
-            type: deviceFileType(for: record.fileType, fileName: record.name),
+            type: typeOverride ?? deviceFileType(for: record.fileType, fileName: record.name),
             size: clampedInt64(record.size),
             parentID: String(record.parentID),
             path: path,
@@ -1077,14 +1166,32 @@ final class MTPDirectSession {
         )
     }
 
+    private func placeholderPlaylistFile(trackID: UInt32, playlists: [MTPPlaylistRecord]) -> DeviceFile {
+        let playlistName = playlists.first { $0.trackIDs.contains(trackID) }?.name ?? "Playlist"
+        let displayName = "Track ID \(trackID)"
+        return DeviceFile(
+            objectID: String(trackID),
+            name: displayName,
+            type: .audio,
+            size: 0,
+            parentID: nil,
+            path: joinPath("Music", joinPath(playlistName, displayName)),
+            backendKind: .mtp,
+            audioMetadata: DeviceAudioMetadata(title: displayName)
+        )
+    }
+
     private func musicCollections(
         for files: [DeviceFile],
         playlists: [MTPPlaylistRecord],
+        m3uPlaylists: [DeviceCollection] = [],
         knownFileIDs: Set<String>
     ) -> [DeviceCollection] {
         var collections = [
             DeviceCollection(id: "all-music", name: "All Music", kind: .allMusic, fileIDs: files.map(\.id))
         ]
+
+        var playlistNames = Set<String>()
 
         for playlist in playlists {
             let fileIDs = playlist.trackIDs.map { "mtp:\($0)" }
@@ -1092,6 +1199,7 @@ final class MTPDirectSession {
             let unmatched = zip(fileIDs, playlist.trackIDs)
                 .filter { !knownFileIDs.contains($0.0) }
                 .map { "Track ID \($0.1)" }
+            guard !matched.isEmpty || !unmatched.isEmpty else { continue }
             collections.append(DeviceCollection(
                 id: "playlist:\(playlist.id)",
                 name: playlist.name,
@@ -1099,6 +1207,15 @@ final class MTPDirectSession {
                 fileIDs: matched,
                 unmatchedItems: unmatched
             ))
+            playlistNames.insert(playlist.name.lowercased())
+        }
+
+        // File-based playlists (.m3u8) — primary source on many Garmin watches.
+        for collection in m3uPlaylists {
+            let key = collection.name.lowercased()
+            if playlistNames.contains(key) { continue }
+            collections.append(collection)
+            playlistNames.insert(key)
         }
 
         let grouped = Dictionary(grouping: files) { file in
@@ -1107,6 +1224,7 @@ final class MTPDirectSession {
         }
         for (folder, folderFiles) in grouped.sorted(by: { $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending }) {
             guard !folder.isEmpty else { continue }
+            // Prefer top-level Music/Playlist-style folders; skip ultra-deep noise if huge.
             collections.append(DeviceCollection(
                 id: "folder:\(folder)",
                 name: (folder as NSString).lastPathComponent,
@@ -1115,7 +1233,78 @@ final class MTPDirectSession {
             ))
         }
 
+        // All Music, then playlists (A–Z), then albums/folders (A–Z).
+        return collections.sorted { lhs, rhs in
+            let lhsRank = collectionSortRank(lhs.kind)
+            let rhsRank = collectionSortRank(rhs.kind)
+            if lhsRank != rhsRank { return lhsRank < rhsRank }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
+    }
+
+    private func collectionSortRank(_ kind: DeviceCollectionKind) -> Int {
+        switch kind {
+        case .allMusic: return 0
+        case .playlist: return 1
+        case .album: return 2
+        case .folder: return 3
+        }
+    }
+
+    /// Download on-device `.m3u` / `.m3u8` files and build playlist collections.
+    private func loadM3UPlaylistCollections(
+        from fileRecords: [MTPFileRecord],
+        audioFiles: [DeviceFile]
+    ) -> [DeviceCollection] {
+        let playlistFiles = fileRecords.filter { isPlaylist($0.name) }
+        guard !playlistFiles.isEmpty else { return [] }
+
+        var collections: [DeviceCollection] = []
+        for record in playlistFiles.sorted(by: { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }) {
+            if MTPCancelState.isCancelled { break }
+            guard let text = readObjectText(objectID: record.id, preferredFileName: record.name) else {
+                continue
+            }
+            let references = M3UPlaylistParser.parseTrackPaths(from: text)
+            guard !references.isEmpty else { continue }
+            let match = M3UPlaylistParser.match(references: references, files: audioFiles)
+            guard !match.fileIDs.isEmpty || !match.unmatchedItems.isEmpty else { continue }
+            let displayName = M3UPlaylistParser.playlistDisplayName(fromFileName: record.name)
+            collections.append(DeviceCollection(
+                id: "m3u:\(record.id)",
+                name: displayName,
+                kind: .playlist,
+                fileIDs: match.fileIDs,
+                unmatchedItems: match.unmatchedItems
+            ))
+        }
         return collections
+    }
+
+    /// Fetch a small text object (playlist) from the device into a temp file and return UTF-8 contents.
+    private func readObjectText(objectID: UInt32, preferredFileName: String) -> String? {
+        let safeName = sanitizedFileName(preferredFileName, fallback: "playlist.m3u8")
+        let target = fileManager.temporaryDirectory
+            .appendingPathComponent("gmm-playlist-\(objectID)-\(UUID().uuidString)-\(safeName)")
+        defer { try? fileManager.removeItem(at: target) }
+
+        let result = target.path.withCString { targetPath in
+            LIBMTP_Get_File_To_File(device, objectID, targetPath, nil, nil)
+        }
+        guard result == 0, fileManager.fileExists(atPath: target.path) else {
+            _ = drainErrorStack()
+            return nil
+        }
+
+        if let utf8 = try? String(contentsOf: target, encoding: .utf8) {
+            return utf8
+        }
+        // Some tools write Latin-1 / Windows playlists.
+        if let data = try? Data(contentsOf: target),
+           let latin1 = String(data: data, encoding: .isoLatin1) {
+            return latin1
+        }
+        return nil
     }
 
     private func storageInfo(files: [DeviceFile]) -> DeviceStorageInfo {
@@ -1345,6 +1534,37 @@ final class MTPDirectSession {
         return .other
     }
 
+    private func shouldExposeAsMusic(
+        _ record: MTPFileRecord,
+        path: String,
+        playlistTrackIDs: Set<UInt32>
+    ) -> Bool {
+        guard record.fileType != LIBMTP_FILETYPE_FOLDER,
+              record.fileType != LIBMTP_FILETYPE_PLAYLIST,
+              !isPlaylist(record.name) else {
+            return false
+        }
+
+        if isAudio(record.fileType, fileName: record.name) {
+            return true
+        }
+        if playlistTrackIDs.contains(record.id) {
+            return true
+        }
+        return isGenericMusicObject(record, path: path)
+    }
+
+    private func isGenericMusicObject(_ record: MTPFileRecord, path: String) -> Bool {
+        guard record.size > 0,
+              record.fileType == LIBMTP_FILETYPE_UNKNOWN || record.fileType == LIBMTP_FILETYPE_MP4 else {
+            return false
+        }
+
+        let ext = (record.name as NSString).pathExtension.lowercased()
+        guard !Self.nonAudioMusicAreaExtensions.contains(ext) else { return false }
+        return isLikelyMusicPath(path)
+    }
+
     private func isAudio(_ fileType: LIBMTP_filetype_t, fileName: String) -> Bool {
         if fileType == LIBMTP_FILETYPE_WAV
             || fileType == LIBMTP_FILETYPE_MP3
@@ -1365,6 +1585,47 @@ final class MTPDirectSession {
         Self.supportedPlaylistExtensions.contains((fileName as NSString).pathExtension.lowercased())
     }
 
+    private func isLikelyMusicPath(_ path: String) -> Bool {
+        let components = folderKey(path)
+            .split(separator: "/")
+            .map { String($0).lowercased() }
+        return components.contains("music")
+            || components.contains("podcast")
+            || components.contains("podcasts")
+            || components.contains("audiobook")
+            || components.contains("audiobooks")
+            || components.contains("audible")
+            || components.contains("spotify")
+            || components.contains("deezer")
+            || components.contains("amazonmusic")
+            || components.contains("media")
+    }
+
+    private func musicDiagnostic(
+        files: [DeviceFile],
+        rawFileCount: Int,
+        trackCount: Int,
+        playlistCount: Int,
+        playlistTrackCount: Int
+    ) -> String? {
+        guard files.isEmpty else {
+            let promotedCount = files.filter { file in
+                guard let objectID = file.objectID.flatMap(UInt32.init) else { return false }
+                return playlistTrackCount > 0 && file.name == "Track ID \(objectID)"
+            }.count
+            guard promotedCount > 0 else { return nil }
+            return "Some Garmin playlist items did not expose filenames, so they are shown by track ID."
+        }
+
+        if trackCount > 0 || playlistTrackCount > 0 || playlistCount > 0 {
+            return "Garmin exposed \(trackCount) track record(s), \(playlistCount) playlist(s), and \(playlistTrackCount) playlist item(s), but no downloadable audio filenames. Streaming-provider music may be protected."
+        }
+        if rawFileCount > 0 {
+            return "Garmin exposed \(rawFileCount) storage object(s), but none were labeled as compatible audio. Streaming-provider music may be protected or hidden from MTP file access."
+        }
+        return "Garmin responded, but did not expose any music files or playlists over MTP."
+    }
+
     private func fileType(forFileName fileName: String) -> LIBMTP_filetype_t {
         switch (fileName as NSString).pathExtension.lowercased() {
         case "mp3":
@@ -1383,5 +1644,8 @@ final class MTPDirectSession {
             return LIBMTP_FILETYPE_UNKNOWN
         }
     }
-}
 
+    private static let nonAudioMusicAreaExtensions: Set<String> = [
+        "bmp", "db", "fit", "gcd", "gif", "ini", "jpeg", "jpg", "json", "log", "png", "tmp", "txt", "xml"
+    ]
+}

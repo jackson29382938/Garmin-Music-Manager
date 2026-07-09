@@ -46,7 +46,9 @@ final class MTPHelperRunner {
                 return try withSession { session in
                     MTPHelperResponse(
                         ok: true,
-                        snapshot: try session.musicSnapshot(),
+                        snapshot: try session.musicSnapshot(
+                            includePlaylistContents: request.includePlaylistContents
+                        ),
                         dependencyStatus: dependencyStatus
                     )
                 }

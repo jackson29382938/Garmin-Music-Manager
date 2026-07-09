@@ -47,10 +47,16 @@ rebuild without re-transfer).
 
 ```text
 User selects tracks → Sync Preview (dry-run)
+  → MTP: reuse fresh device listing when available (skip forced pre-list)
   → SyncCoordinator copies/uploads (async, cancellable, chunked for MTP)
+  → Helper returns uploaded object IDs; playlist built without full re-list when possible
   → M3UWriter .m3u8 (mounted)  OR  createPlaylist via helper (MTP)
-  → DeviceBrowserStore refreshes destination listing (once; avoid double re-list)
+  → DeviceBrowserStore refreshes destination listing at most once for UI
 ```
+
+`listMusic` does **not** download on-device `.m3u`/`.m3u8` bodies by default
+(`includePlaylistContents: false`); that was a major cost on Forerunner-class MTP.
+The helper also caches the last music snapshot for the warm session until a write.
 
 ### Overwrite policies
 

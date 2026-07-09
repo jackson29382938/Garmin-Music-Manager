@@ -606,11 +606,23 @@ final class MTPHelperClient {
     }
 
     func snapshot(request: MTPHelperRequest) async throws -> DeviceFileSystemSnapshot {
-        let response = try await perform(request: request, timeout: request.operation == .listStorageTree ? 180 : 90)
+        // Full Garmin libraries (1k+ objects) often take 30–90s over USB; keep headroom.
+        let response = try await perform(request: request, timeout: listingTimeout(for: request.operation))
         guard let snapshot = response.snapshot else {
             throw DeviceFileSystemError.helperFailed("The Garmin helper did not return device files.")
         }
         return snapshot
+    }
+
+    private func listingTimeout(for operation: MTPHelperOperation) -> TimeInterval {
+        switch operation {
+        case .listStorageTree:
+            return 240
+        case .listMusic, .storageInfo, .detect:
+            return 180
+        default:
+            return 90
+        }
     }
 
     func operationResult(
@@ -643,6 +655,7 @@ final class MTPHelperClient {
     ) async throws -> DeviceFileOperationResult {
         var completed = 0
         var failures: [String] = []
+        var uploadedObjects: [DeviceUploadedObject] = []
         let chunks = stride(from: 0, to: files.count, by: Self.uploadChunkSize).map {
             Array(files[$0..<min($0 + Self.uploadChunkSize, files.count)])
         }
@@ -684,6 +697,7 @@ final class MTPHelperClient {
             if let result = response.operationResult {
                 completed += result.completedCount
                 failures.append(contentsOf: result.failedItems)
+                uploadedObjects.append(contentsOf: result.uploadedFiles)
 
                 let failedNames = Set(result.failedItems)
                 if failedNames.isEmpty, result.completedCount >= chunk.count {
@@ -712,7 +726,12 @@ final class MTPHelperClient {
         } else {
             message = "\(completed) file(s) uploaded; \(failures.count) failed."
         }
-        return DeviceFileOperationResult(completedCount: completed, failedItems: failures, message: message)
+        return DeviceFileOperationResult(
+            completedCount: completed,
+            failedItems: failures,
+            message: message,
+            uploadedFiles: uploadedObjects
+        )
     }
 
     func status() async throws -> MTPToolStatus {
@@ -752,9 +771,17 @@ final class MTPHelperClient {
             return min(600, max(45, 30 + TimeInterval(request.files.count * 4)))
         case .move:
             return 600
-        case .status, .detect, .listMusic, .listStorageTree, .storageInfo, .createPlaylist:
-            // Warm session makes listing far cheaper; keep headroom for large libraries.
-            return request.operation == .listStorageTree ? 180 : 90
+        case .status:
+            return 15
+        case .detect:
+            return 60
+        case .listMusic, .storageInfo:
+            // Large Garmin libraries (hundreds of tracks) routinely take 30–90s to enumerate.
+            return 180
+        case .listStorageTree:
+            return 240
+        case .createPlaylist:
+            return 90
         }
     }
 

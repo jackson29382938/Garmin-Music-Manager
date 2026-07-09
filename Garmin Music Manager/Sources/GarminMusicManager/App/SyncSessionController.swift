@@ -184,8 +184,12 @@ final class SyncSessionController {
                 try Task.checkCancellation()
                 configureMTP()
                 onProgress(0.05, nil)
-                onLog("Refreshing Garmin library before sync…")
-                await deviceBrowser.refresh(force: true)
+                if deviceBrowser.hasFreshListing {
+                    onLog("Using recent Garmin library listing for sync plan…")
+                } else {
+                    onLog("Refreshing Garmin library before sync…")
+                    await deviceBrowser.refresh(force: true)
+                }
                 try Task.checkCancellation()
 
                 let preparation = syncCoordinator.prepareTracks(tracks, settings: settings)

@@ -329,13 +329,14 @@ public enum MTPOutputParser {
         }
 
         return entries.map { entry in
-            DeviceFile(
+            let path = resolvePath(for: entry)
+            return DeviceFile(
                 objectID: entry.fileID,
                 name: entry.filename,
-                type: fileType(for: entry),
+                type: fileType(for: entry, path: path),
                 size: entry.fileSize,
                 parentID: entry.parentID,
-                path: resolvePath(for: entry),
+                path: path,
                 backendKind: .mtp
             )
         }
@@ -408,11 +409,29 @@ public enum MTPOutputParser {
         }
     }
 
-    private static func fileType(for entry: MTPRawEntry) -> DeviceFileType {
+    private static func fileType(for entry: MTPRawEntry, path: String? = nil) -> DeviceFileType {
         if entry.isFolder { return .folder }
-        if entry.isAudio { return .audio }
         if entry.isPlaylist { return .playlist }
+        if entry.isAudio(path: path) { return .audio }
         return .other
+    }
+
+    fileprivate static func isLikelyMusicPath(_ path: String) -> Bool {
+        let components = path
+            .replacingOccurrences(of: "\\", with: "/")
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/").union(.whitespacesAndNewlines))
+            .split(separator: "/")
+            .map { String($0).lowercased() }
+        return components.contains("music")
+            || components.contains("podcast")
+            || components.contains("podcasts")
+            || components.contains("audiobook")
+            || components.contains("audiobooks")
+            || components.contains("audible")
+            || components.contains("spotify")
+            || components.contains("deezer")
+            || components.contains("amazonmusic")
+            || components.contains("media")
     }
 
     private static func musicPath(for track: MTPTrackEntry) -> String {
@@ -548,11 +567,25 @@ public struct MTPRawEntry: Codable, Hashable {
     }
 
     public var isAudio: Bool {
+        isAudio(path: nil)
+    }
+
+    public func isAudio(path: String?) -> Bool {
         let ext = (filename as NSString).pathExtension.lowercased()
         let type = filetype?.lowercased() ?? ""
         let audioTypeHints = ["audio", "mp3", "mp4", "aac", "wav", "mpeg", "flac"]
-        return MTPOutputParser.supportsAudioExtension(ext)
-            || audioTypeHints.contains(where: { type.contains($0) })
+        if MTPOutputParser.supportsAudioExtension(ext)
+            || audioTypeHints.contains(where: { type.contains($0) }) {
+            return true
+        }
+        guard fileSize > 0,
+              !MTPOutputParser.nonAudioMusicAreaExtensions.contains(ext),
+              let path,
+              MTPOutputParser.isLikelyMusicPath(path) else {
+            return false
+        }
+        let genericTypeHints = ["unknown", "undefined", "object", "file"]
+        return filetype == nil || genericTypeHints.contains(where: { type.contains($0) })
     }
 
     public var isPlaylist: Bool {
@@ -651,5 +684,9 @@ public extension MTPOutputParser {
 
     static func supportsPlaylistExtension(_ ext: String) -> Bool {
         supportedPlaylistExtensions.contains(ext.lowercased())
+    }
+
+    fileprivate static var nonAudioMusicAreaExtensions: Set<String> {
+        ["bmp", "db", "fit", "gcd", "gif", "ini", "jpeg", "jpg", "json", "log", "png", "tmp", "txt", "xml"]
     }
 }
