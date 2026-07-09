@@ -5,6 +5,7 @@
 # Usage:
 #   ./Scripts/package-app.sh                 # release, ad-hoc sign
 #   ./Scripts/package-app.sh --debug         # debug build
+#   ./Scripts/package-app.sh --clean         # remove dist/ before building
 #   CODESIGN_IDENTITY="Developer ID Application: …" ./Scripts/package-app.sh
 #   CODESIGN_IDENTITY="…" NOTARIZE=1 \
 #     NOTARY_PROFILE="AC_PASSWORD" ./Scripts/package-app.sh
@@ -31,6 +32,7 @@ CONFIG="release"
 for arg in "$@"; do
   case "$arg" in
     --debug) CONFIG="debug" ;;
+    --clean) CLEAN=1 ;;
     --notarize) NOTARIZE=1 ;;
   esac
 done
@@ -41,6 +43,10 @@ CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 FRAMEWORKS_DIR="$CONTENTS_DIR/Frameworks"
 RESOURCES_DIR="$CONTENTS_DIR/Resources"
+
+if [[ "${CLEAN:-0}" == "1" ]]; then
+  rm -rf "$DIST_DIR"
+fi
 
 # Prefer VERSION file (semver), then git tags, then fallback.
 VERSION_FILE="$ROOT_DIR/VERSION"
@@ -63,13 +69,14 @@ else
 fi
 echo "==> App version: $VERSION"
 ICON_SVG="$ROOT_DIR/Resources/AppIcon.svg"
+ICON_PNG="$ROOT_DIR/Resources/AppIcon.png"
 ICON_ICNS="$ROOT_DIR/Resources/AppIcon.icns"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-}"
 NOTARIZE="${NOTARIZE:-0}"
 BUNDLE_LIBS="${BUNDLE_LIBS:-1}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-}"
 
-if [[ -f "$ICON_SVG" ]]; then
+if [[ -f "$ICON_PNG" || -f "$ICON_SVG" ]]; then
   echo "==> Generating app icon"
   bash "$SCRIPT_DIR/generate-icon.sh"
 fi

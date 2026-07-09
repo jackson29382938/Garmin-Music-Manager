@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 #
-# Rasterizes Resources/AppIcon.svg into Resources/AppIcon.icns
+# Rasterizes Resources/AppIcon.png (preferred) or Resources/AppIcon.svg into Resources/AppIcon.icns
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 SVG_PATH="$ROOT_DIR/Resources/AppIcon.svg"
+PNG_PATH="$ROOT_DIR/Resources/AppIcon.png"
 ICONSET_DIR="$ROOT_DIR/Resources/AppIcon.iconset"
 ICNS_PATH="$ROOT_DIR/Resources/AppIcon.icns"
 
-if [[ ! -f "$SVG_PATH" ]]; then
-    echo "error: missing $SVG_PATH" >&2
+if [[ ! -f "$PNG_PATH" && ! -f "$SVG_PATH" ]]; then
+    echo "error: missing $PNG_PATH or $SVG_PATH" >&2
     exit 1
 fi
 
@@ -19,8 +20,12 @@ WORK_DIR="$(mktemp -d)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
 MASTER_PNG="$WORK_DIR/master.png"
-qlmanage -t -s 1024 -o "$WORK_DIR" "$SVG_PATH" >/dev/null 2>&1
-mv "$WORK_DIR/$(basename "$SVG_PATH").png" "$MASTER_PNG"
+if [[ -f "$PNG_PATH" ]]; then
+    sips -z 1024 1024 "$PNG_PATH" --out "$MASTER_PNG" >/dev/null
+else
+    qlmanage -t -s 1024 -o "$WORK_DIR" "$SVG_PATH" >/dev/null 2>&1
+    mv "$WORK_DIR/$(basename "$SVG_PATH").png" "$MASTER_PNG"
+fi
 
 rm -rf "$ICONSET_DIR"
 mkdir -p "$ICONSET_DIR"

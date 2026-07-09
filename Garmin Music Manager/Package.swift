@@ -48,6 +48,9 @@ let package = Package(
             name: "GarminMusicManager",
             dependencies: ["GarminMusicCore"],
             path: "Sources/GarminMusicManager",
+            resources: [
+                .process("Resources")
+            ],
             linkerSettings: [
                 .linkedFramework("iTunesLibrary")
             ]

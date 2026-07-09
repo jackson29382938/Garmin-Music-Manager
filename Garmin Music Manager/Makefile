@@ -1,4 +1,4 @@
-.PHONY: build run app app-debug app-signed clean
+.PHONY: build run app app-debug app-signed rebuild clean
 
 build:
 	swift build
@@ -13,6 +13,10 @@ app:
 # Package a debug .app bundle into ./dist
 app-debug:
 	./Scripts/package-app.sh --debug
+
+# Rebuild the app bundle from scratch into ./dist
+rebuild:
+	./rebuild-app.sh
 
 # Developer ID sign (set CODESIGN_IDENTITY). Optional: NOTARIZE=1 NOTARY_PROFILE=…
 app-signed:
