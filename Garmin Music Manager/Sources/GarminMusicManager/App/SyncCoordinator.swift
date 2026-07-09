@@ -10,9 +10,10 @@ final class SyncCoordinator {
         tracks: [AudioTrack],
         playlistName: String,
         destination: URL,
-        settings: SyncSettings
+        settings: SyncSettings,
+        performance: PerformanceSettings = .default
     ) throws -> SyncPreview {
-        let preparation = prepareTracks(tracks, settings: settings)
+        let preparation = prepareTracks(tracks, settings: settings, performance: performance)
         return try syncService.buildPreview(
             tracks: preparation.tracks,
             playlistName: playlistName,
@@ -25,9 +26,10 @@ final class SyncCoordinator {
         tracks: [AudioTrack],
         playlistName: String,
         settings: SyncSettings,
-        deviceFiles: [DeviceFile]
+        deviceFiles: [DeviceFile],
+        performance: PerformanceSettings = .default
     ) -> SyncPreview {
-        let preparation = prepareTracks(tracks, settings: settings)
+        let preparation = prepareTracks(tracks, settings: settings, performance: performance)
         let plan = MTPSyncPlanner.buildPlan(
             tracks: preparation.tracks,
             playlistName: playlistName,
@@ -42,14 +44,15 @@ final class SyncCoordinator {
         deviceBrowser: DeviceBrowserStore,
         playlistName: String,
         settings: SyncSettings,
+        performance: PerformanceSettings = .default,
         refreshAfter: Bool = true,
-        progress: @escaping @Sendable (Double, String?) -> Void
+        progress: @escaping @Sendable (TransferProgressSnapshot) -> Void
     ) async -> MTPSyncResult {
         let skipped = plan.skippedCount
         let uploads = plan.uploads
 
         if plan.transferCount == 0 && uploads.isEmpty {
-            progress(0.85, settings.writePlaylist ? "Building playlist…" : nil)
+            progress(.phase(0.85, settings.writePlaylist ? "Building playlist…" : nil))
             let preSync = deviceBrowser.files
             let canSkipList = MTPPlaylistResolver.canResolveWithoutRefresh(
                 plan: plan,
@@ -71,7 +74,7 @@ final class SyncCoordinator {
             if refreshAfter {
                 await deviceBrowser.refresh(force: true)
             }
-            progress(1, playlist.map { "Playlist “\($0)” ready." })
+            progress(.phase(1, playlist.map { "Playlist “\($0)” ready." }))
             return MTPSyncResult(
                 uploadedCount: 0,
                 skippedCount: skipped,
@@ -83,10 +86,10 @@ final class SyncCoordinator {
             )
         }
 
-        progress(0.05, "Preparing \(plan.transferCount) track(s) for Garmin…")
+        progress(.phase(0.05, "Preparing \(plan.transferCount) track(s) for Garmin…"))
 
         guard !uploads.isEmpty else {
-            progress(1, nil)
+            progress(.phase(1, nil))
             return MTPSyncResult(
                 uploadedCount: 0,
                 skippedCount: skipped,
@@ -98,7 +101,11 @@ final class SyncCoordinator {
 
         // Chunk uploads for partial recovery. Progress comes from libmtp NDJSON
         // events (per-byte within each file) remapped across the full plan.
-        let chunkSize = MTPHelperClient.uploadChunkSize
+        // Batch size matches Settings / PerformanceSettings (1…50), not a hard 20.
+        let chunkSize = max(
+            PerformanceSettings.uploadBatchRange.lowerBound,
+            min(PerformanceSettings.uploadBatchRange.upperBound, performance.uploadBatchSize)
+        )
         let chunks: [[DeviceUploadFile]] = stride(from: 0, to: uploads.count, by: chunkSize).map {
             Array(uploads[$0..<min($0 + chunkSize, uploads.count)])
         }
@@ -110,8 +117,12 @@ final class SyncCoordinator {
         /// Bytes known to have finished successfully (not speculative chunk totals).
         var completedBytes: Int64 = 0
         var wasCancelled = false
+        var succeededTrackIDs = Set<UUID>()
+        var failedTrackIDSet = Set<UUID>()
         /// Pre-sync listing used for skip-identical object IDs (avoids a post-list).
         let preSyncDeviceFiles = deviceBrowser.files
+        /// Upload index of the first file not fully processed (for remaining IDs).
+        var nextUploadIndex = 0
 
         let transferBase = 0.08
         let transferSpan = settings.writePlaylist ? 0.78 : 0.88
@@ -124,11 +135,16 @@ final class SyncCoordinator {
 
             let chunkBytes = Self.totalByteCount(of: chunk)
             let bytesBeforeChunk = completedBytes
+            let chunkStartGlobal = nextUploadIndex
 
-            progress(
-                transferBase + transferSpan * (Double(bytesBeforeChunk) / Double(totalBytes)),
-                "Uploading \(completed + 1)–\(min(completed + chunk.count, uploads.count)) of \(uploads.count)…"
-            )
+            let chunkStartIndex = completed
+            progress(TransferProgressSnapshot(
+                fraction: transferBase + transferSpan * (Double(bytesBeforeChunk) / Double(totalBytes)),
+                message: "Uploading \(completed + 1)–\(min(completed + chunk.count, uploads.count)) of \(uploads.count)…",
+                itemIndex: chunkStartIndex,
+                itemCount: uploads.count,
+                itemName: chunk.first?.displayName
+            ))
 
             // Track the highest progress seen inside this chunk so a total failure
             // can still leave the bar at a truthful partial value (not a jump).
@@ -139,15 +155,25 @@ final class SyncCoordinator {
                 let withinChunk = event.overallFraction * Double(max(chunkBytes, 1))
                 let overallBytes = Double(bytesBeforeChunk) + withinChunk
                 let fraction = transferBase + transferSpan * min(1, overallBytes / Double(totalBytes))
-                progress(fraction, event.displayMessage)
+                let globalIndex = chunkStartIndex + event.itemIndex
+                progress(TransferProgressSnapshot(
+                    fraction: fraction,
+                    message: event.displayMessage,
+                    itemIndex: globalIndex,
+                    itemCount: uploads.count,
+                    itemName: event.itemName,
+                    bytesTransferred: event.bytesTransferred,
+                    bytesTotal: event.bytesTotal
+                ))
             }) {
-                if Task.isCancelled {
-                    wasCancelled = true
-                }
-
                 completed += uploadResult.completedCount
                 failedItems.append(contentsOf: uploadResult.failedItems)
                 uploadedObjects.append(contentsOf: uploadResult.uploadedFiles)
+
+                let classification = Self.classifyChunkResult(chunk: chunk, result: uploadResult)
+                succeededTrackIDs.formUnion(classification.succeeded)
+                failedTrackIDSet.formUnion(classification.failed)
+                nextUploadIndex = chunkStartGlobal + classification.processedCount
 
                 // Advance by successfully transferred bytes only. If the helper
                 // reports partial success, estimate success share from counts.
@@ -159,91 +185,127 @@ final class SyncCoordinator {
                     peakFraction: peakWithinChunk.value
                 )
                 completedBytes += successBytes
+
+                // Helper may return a partial result with a "Cancelled after…" message
+                // instead of throwing — credit successes and stop further chunks.
+                let resultLooksCancelled = uploadResult.message?
+                    .localizedCaseInsensitiveContains("cancelled") == true
+                if Task.isCancelled || resultLooksCancelled {
+                    wasCancelled = true
+                    break
+                }
             } else {
                 if Task.isCancelled {
                     wasCancelled = true
                     // Keep progress at last known peak; do not mark remaining as failed.
                     break
                 }
+                // Hard transport failure: entire chunk failed.
                 failedItems.append(contentsOf: chunk.map(\.displayName))
-                // Full chunk failure: no byte credit.
+                for file in chunk {
+                    if let id = file.clientTrackUUID {
+                        failedTrackIDSet.insert(id)
+                    }
+                }
+                nextUploadIndex = chunkStartGlobal + chunk.count
             }
         }
 
+        let remainingTrackIDs: [UUID]
+        if nextUploadIndex < uploads.count {
+            remainingTrackIDs = uploads[nextUploadIndex...].compactMap(\.clientTrackUUID)
+                .filter { !succeededTrackIDs.contains($0) && !failedTrackIDSet.contains($0) }
+        } else {
+            remainingTrackIDs = []
+        }
+
+        // Fallback identity: plan items matched by display/path when client IDs missing.
         let failedNames = Set(failedItems)
         let failedPlanItems = plan.items.filter { item in
             guard item.action != .skipIdentical else { return false }
+            if failedTrackIDSet.contains(item.track.id) { return true }
             if failedNames.contains(item.track.displayName) { return true }
             if let upload = item.uploadFile, failedNames.contains(upload.displayName) { return true }
             if failedNames.contains(item.targetRemotePath) { return true }
             return false
         }
+        for item in failedPlanItems {
+            failedTrackIDSet.insert(item.track.id)
+        }
+        // Drop successes from failed set if double-counted.
+        failedTrackIDSet.subtract(succeededTrackIDs)
+
         let failedRemotePaths = Set(failedPlanItems.map { MTPSyncPlanner.normalizePath($0.targetRemotePath) })
         let failedKeys = failedRemotePaths.union(failedNames)
-        let failedTrackIDs = failedPlanItems.map(\.track.id)
+        let failedTrackIDs = Array(failedTrackIDSet)
         let replacedCount = plan.items.filter { item in
             guard item.action == .replace else { return false }
+            if failedTrackIDSet.contains(item.track.id) { return false }
+            if remainingTrackIDs.contains(item.track.id) { return false }
             let pathKey = MTPSyncPlanner.normalizePath(item.targetRemotePath)
             if failedRemotePaths.contains(pathKey) { return false }
             if failedNames.contains(item.track.displayName) { return false }
-            return true
+            return succeededTrackIDs.contains(item.track.id) || !wasCancelled
         }.count
-
-        if wasCancelled {
-            progress(
-                transferBase + transferSpan * (Double(completedBytes) / Double(totalBytes)),
-                "Cancelled after \(completed) of \(uploads.count) upload(s)."
-            )
-            return MTPSyncResult(
-                uploadedCount: completed,
-                skippedCount: skipped,
-                replacedCount: replacedCount,
-                failedCount: failedItems.count,
-                wasCancelled: true,
-                playlistName: nil,
-                failedItems: failedItems,
-                failedTrackIDs: failedTrackIDs
-            )
-        }
 
         // Prefer object IDs from this transfer + the pre-sync listing so we can
         // build a native playlist without a multi-minute full re-list.
-        let canSkipList = MTPPlaylistResolver.canResolveWithoutRefresh(
-            plan: plan,
-            failedDisplayNames: failedKeys,
-            deviceFiles: preSyncDeviceFiles,
-            uploadedObjects: uploadedObjects
+        // Also after cancel when some files already landed.
+        var playlistNameResult: String?
+        let remainingRemoteKeys = Set(
+            uploads[nextUploadIndex...].map { MTPSyncPlanner.normalizePath($0.remotePath) }
         )
+        let playlistExcludeKeys = failedKeys.union(remainingRemoteKeys)
+        let shouldWritePlaylist = settings.writePlaylist
+            && (completed > 0 || (!wasCancelled && plan.skippedCount > 0 && plan.transferCount == 0)
+                || (!wasCancelled && plan.skippedCount > 0 && completed + failedItems.count >= plan.transferCount))
+        if shouldWritePlaylist {
+            let canSkipList = MTPPlaylistResolver.canResolveWithoutRefresh(
+                plan: plan,
+                failedDisplayNames: playlistExcludeKeys,
+                deviceFiles: preSyncDeviceFiles,
+                uploadedObjects: uploadedObjects
+            )
+            playlistNameResult = await maybeCreateMTPPlaylist(
+                plan: plan,
+                failedRemotePaths: playlistExcludeKeys,
+                deviceBrowser: deviceBrowser,
+                playlistName: playlistName,
+                settings: settings,
+                preSyncDeviceFiles: preSyncDeviceFiles,
+                uploadedObjects: uploadedObjects,
+                refreshFirst: !canSkipList,
+                progress: progress
+            )
+        }
 
-        let playlist = await maybeCreateMTPPlaylist(
-            plan: plan,
-            failedRemotePaths: failedKeys,
-            deviceBrowser: deviceBrowser,
-            playlistName: playlistName,
-            settings: settings,
-            preSyncDeviceFiles: preSyncDeviceFiles,
-            uploadedObjects: uploadedObjects,
-            refreshFirst: !canSkipList && settings.writePlaylist,
-            progress: progress
-        )
-
-        // At most one UI refresh after the transfer (optional).
-        if refreshAfter {
-            progress(0.98, "Updating device browser…")
+        // Refresh after any transfer activity (including cancel) so On Watch matches the device.
+        if refreshAfter, completed > 0 || wasCancelled || !failedItems.isEmpty || plan.transferCount == 0 {
+            progress(.phase(0.98, "Updating device browser…"))
             await deviceBrowser.refresh(force: true)
         }
 
-        progress(1, nil)
+        if wasCancelled {
+            progress(TransferProgressSnapshot(
+                fraction: transferBase + transferSpan * (Double(completedBytes) / Double(totalBytes)),
+                message: "Cancelled after \(completed) of \(uploads.count) upload(s).",
+                itemIndex: max(0, completed - 1),
+                itemCount: uploads.count
+            ))
+        } else {
+            progress(.phase(1, nil))
+        }
 
         return MTPSyncResult(
             uploadedCount: completed,
             skippedCount: skipped,
             replacedCount: replacedCount,
             failedCount: failedItems.count,
-            wasCancelled: false,
-            playlistName: playlist,
+            wasCancelled: wasCancelled,
+            playlistName: playlistNameResult,
             failedItems: failedItems,
-            failedTrackIDs: failedTrackIDs
+            failedTrackIDs: failedTrackIDs,
+            remainingTrackIDs: remainingTrackIDs
         )
     }
 
@@ -256,13 +318,13 @@ final class SyncCoordinator {
         preSyncDeviceFiles: [DeviceFile] = [],
         uploadedObjects: [DeviceUploadedObject] = [],
         refreshFirst: Bool,
-        progress: @escaping @Sendable (Double, String?) -> Void
+        progress: @escaping @Sendable (TransferProgressSnapshot) -> Void
     ) async -> String? {
         guard settings.writePlaylist else { return nil }
         guard deviceBrowser.backendKind == .mtp else { return nil }
 
         if refreshFirst {
-            progress(0.90, "Refreshing Garmin library…")
+            progress(.phase(0.90, "Refreshing Garmin library…"))
             await deviceBrowser.refresh(force: true)
         }
 
@@ -275,7 +337,7 @@ final class SyncCoordinator {
         )
         // Last resort: if we still cannot resolve and have not refreshed, try once.
         if tracks.isEmpty, !refreshFirst {
-            progress(0.90, "Refreshing Garmin library…")
+            progress(.phase(0.90, "Refreshing Garmin library…"))
             await deviceBrowser.refresh(force: true)
             tracks = MTPPlaylistResolver.playlistTracks(
                 plan: plan,
@@ -285,18 +347,18 @@ final class SyncCoordinator {
             )
         }
         guard !tracks.isEmpty else {
-            progress(0.96, "Playlist skipped (no matching tracks on the Garmin yet).")
+            progress(.phase(0.96, "Playlist skipped (no matching tracks on the Garmin yet)."))
             return nil
         }
 
         let cleanName = FileNameSanitizer.sanitizeFileName(playlistName)
-        progress(0.95, "Writing playlist “\(cleanName)”…")
+        progress(.phase(0.95, "Writing playlist “\(cleanName)”…"))
         if let result = await deviceBrowser.createPlaylist(name: cleanName, tracks: tracks) {
-            progress(0.98, result.message)
+            progress(.phase(0.98, result.message))
             return cleanName
         }
         if let error = deviceBrowser.lastError {
-            progress(0.98, "Playlist not created: \(error)")
+            progress(.phase(0.98, "Playlist not created: \(error)"))
         }
         return nil
     }
@@ -306,9 +368,10 @@ final class SyncCoordinator {
         playlistName: String,
         destination: URL,
         settings: SyncSettings,
-        progress: @escaping @Sendable (Double, String?) -> Void
+        performance: PerformanceSettings = .default,
+        progress: @escaping @Sendable (TransferProgressSnapshot) -> Void
     ) async throws -> SyncResult {
-        let preparation = prepareTracks(tracks, settings: settings)
+        let preparation = prepareTracks(tracks, settings: settings, performance: performance)
         return try await syncService.sync(
             tracks: preparation.tracks,
             playlistName: playlistName,
@@ -318,35 +381,67 @@ final class SyncCoordinator {
         )
     }
 
-    /// Prepares tracks for transfer, converting ALAC/FLAC when enabled.
+    /// Prepares tracks for transfer: ALAC/FLAC conversion when enabled, optional large-file compress.
     /// Failures are reported in `conversionFailures` instead of being silent.
-    func prepareTracks(_ tracks: [AudioTrack], settings: SyncSettings) -> TrackPreparationResult {
-        guard settings.convertIncompatibleFormats else {
+    func prepareTracks(
+        _ tracks: [AudioTrack],
+        settings: SyncSettings,
+        performance: PerformanceSettings = .default,
+        conversion: ConversionSettings = .default
+    ) -> TrackPreparationResult {
+        let perf = performance.clamped
+        let conv = conversion.clamped
+        let largeThreshold = perf.largeFileByteThreshold
+        let anyNeedsWork = tracks.contains { track in
+            let format = settings.convertIncompatibleFormats
+                && MusicCompatibilityEvaluator.needsConversion(ext: track.fileExtension, codecHint: track.codecHint)
+            let large = largeThreshold.map { track.byteCount >= $0 } ?? false
+            return format || large
+        }
+        guard anyNeedsWork else {
             return TrackPreparationResult(tracks: tracks, conversionFailures: [], convertedCount: 0)
         }
 
-        guard audioConverter.isAvailable else {
-            let needing = tracks.filter {
-                MusicCompatibilityEvaluator.needsConversion(ext: $0.fileExtension, codecHint: $0.codecHint)
-            }
-            let failures = needing.map {
-                "Cannot convert \($0.displayName): ffmpeg is not installed (brew install ffmpeg)."
+        if !audioConverter.isAvailable {
+            var failures: [String] = []
+            for track in tracks {
+                let needsFormat = settings.convertIncompatibleFormats
+                    && MusicCompatibilityEvaluator.needsConversion(ext: track.fileExtension, codecHint: track.codecHint)
+                let needsLarge = largeThreshold.map { track.byteCount >= $0 } ?? false
+                if needsFormat {
+                    failures.append(
+                        "Cannot convert \(track.displayName): ffmpeg is not installed (brew install ffmpeg)."
+                    )
+                } else if needsLarge {
+                    failures.append(
+                        "Cannot compress \(track.displayName): ffmpeg is not installed (brew install ffmpeg)."
+                    )
+                }
             }
             return TrackPreparationResult(tracks: tracks, conversionFailures: failures, convertedCount: 0)
         }
 
+        let bitrate = perf.aacBitrateKbps
         var prepared: [AudioTrack] = []
         var failures: [String] = []
         var convertedCount = 0
 
         for track in tracks {
-            guard MusicCompatibilityEvaluator.needsConversion(ext: track.fileExtension, codecHint: track.codecHint) else {
+            let needsFormatConversion = settings.convertIncompatibleFormats
+                && MusicCompatibilityEvaluator.needsConversion(ext: track.fileExtension, codecHint: track.codecHint)
+            let needsSizeConversion = largeThreshold.map { track.byteCount >= $0 } ?? false
+            guard needsFormatConversion || needsSizeConversion else {
                 prepared.append(track)
                 continue
             }
 
             do {
-                let convertedURL = try audioConverter.convertToAAC(source: track.url)
+                let convertedURL = try audioConverter.convertToAAC(
+                    source: track.url,
+                    bitrateKbps: bitrate,
+                    sampleRate: conv.aacSampleRate,
+                    reuseExisting: conv.keepConversionCache
+                )
                 let byteCount = (try? FileManager.default.attributesOfItem(atPath: convertedURL.path)[.size] as? NSNumber)?.int64Value
                     ?? track.byteCount
                 prepared.append(AudioTrack(
@@ -367,7 +462,6 @@ final class SyncCoordinator {
                 convertedCount += 1
             } catch {
                 failures.append("Conversion failed for \(track.displayName): \(error.localizedDescription)")
-                // Keep original so planner/UI can still show it as blocked/incompatible.
                 prepared.append(track)
             }
         }
@@ -376,8 +470,59 @@ final class SyncCoordinator {
     }
 
     /// Backward-compatible wrapper used by older call sites.
-    func preparedTracks(_ tracks: [AudioTrack], settings: SyncSettings) -> [AudioTrack] {
-        prepareTracks(tracks, settings: settings).tracks
+    func preparedTracks(
+        _ tracks: [AudioTrack],
+        settings: SyncSettings,
+        performance: PerformanceSettings = .default,
+        conversion: ConversionSettings = .default
+    ) -> [AudioTrack] {
+        prepareTracks(tracks, settings: settings, performance: performance, conversion: conversion).tracks
+    }
+
+    // MARK: - Chunk identity helpers
+
+    private struct ChunkClassification {
+        var succeeded: Set<UUID>
+        var failed: Set<UUID>
+        /// Number of leading files in the chunk that were attempted (success or fail).
+        var processedCount: Int
+    }
+
+    /// Maps helper upload results back to stable client track IDs within one chunk.
+    private static func classifyChunkResult(
+        chunk: [DeviceUploadFile],
+        result: DeviceFileOperationResult
+    ) -> ChunkClassification {
+        let failedNames = Set(result.failedItems)
+        let uploadedByName = Set(result.uploadedFiles.map(\.displayName))
+        let uploadedByPath = Set(result.uploadedFiles.map { MTPSyncPlanner.normalizePath($0.remotePath) })
+
+        var succeeded = Set<UUID>()
+        var failed = Set<UUID>()
+        var processed = 0
+
+        for file in chunk {
+            let pathKey = MTPSyncPlanner.normalizePath(file.remotePath)
+            let isFailed = failedNames.contains(file.displayName)
+                || failedNames.contains(file.remotePath)
+                || failedNames.contains(pathKey)
+            let isUploaded = uploadedByName.contains(file.displayName)
+                || uploadedByPath.contains(pathKey)
+
+            if isFailed {
+                if let id = file.clientTrackUUID { failed.insert(id) }
+                processed += 1
+            } else if isUploaded {
+                if let id = file.clientTrackUUID { succeeded.insert(id) }
+                processed += 1
+            } else {
+                // Unmentioned file — treat as not attempted (cancel / early stop).
+                // Remaining files in the chunk are also unprocessed.
+                break
+            }
+        }
+
+        return ChunkClassification(succeeded: succeeded, failed: failed, processedCount: processed)
     }
 
     // MARK: - Byte accounting helpers

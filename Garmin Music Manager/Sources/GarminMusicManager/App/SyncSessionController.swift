@@ -22,6 +22,7 @@ final class SyncSessionController {
         tracks: [AudioTrack],
         playlistName: String,
         settings: SyncSettings,
+        performance: PerformanceSettings = .default,
         activeDestination: URL?,
         deviceFiles: [DeviceFile],
         mtpReady: Bool
@@ -31,7 +32,8 @@ final class SyncSessionController {
                 tracks: tracks,
                 playlistName: playlistName,
                 destination: destination,
-                settings: settings
+                settings: settings,
+                performance: performance
             )
         }
         guard mtpReady else {
@@ -41,16 +43,37 @@ final class SyncSessionController {
             tracks: tracks,
             playlistName: playlistName,
             settings: settings,
-            deviceFiles: deviceFiles
+            deviceFiles: deviceFiles,
+            performance: performance
         )
     }
 
-    func prepareTracks(_ tracks: [AudioTrack], settings: SyncSettings) -> TrackPreparationResult {
-        syncCoordinator.prepareTracks(tracks, settings: settings)
+    func prepareTracks(
+        _ tracks: [AudioTrack],
+        settings: SyncSettings,
+        performance: PerformanceSettings = .default,
+        conversion: ConversionSettings = .default
+    ) -> TrackPreparationResult {
+        syncCoordinator.prepareTracks(
+            tracks,
+            settings: settings,
+            performance: performance,
+            conversion: conversion
+        )
     }
 
-    func preparedTracks(_ tracks: [AudioTrack], settings: SyncSettings) -> [AudioTrack] {
-        syncCoordinator.preparedTracks(tracks, settings: settings)
+    func preparedTracks(
+        _ tracks: [AudioTrack],
+        settings: SyncSettings,
+        performance: PerformanceSettings = .default,
+        conversion: ConversionSettings = .default
+    ) -> [AudioTrack] {
+        syncCoordinator.preparedTracks(
+            tracks,
+            settings: settings,
+            performance: performance,
+            conversion: conversion
+        )
     }
 
     func executeMTPPlan(
@@ -58,14 +81,16 @@ final class SyncSessionController {
         deviceBrowser: DeviceBrowserStore,
         playlistName: String,
         settings: SyncSettings,
+        performance: PerformanceSettings = .default,
         refreshAfter: Bool = true,
-        progress: @escaping @Sendable (Double, String?) -> Void
+        progress: @escaping @Sendable (TransferProgressSnapshot) -> Void
     ) async -> MTPSyncResult {
         await syncCoordinator.executeMTPPlan(
             plan,
             deviceBrowser: deviceBrowser,
             playlistName: playlistName,
             settings: settings,
+            performance: performance,
             refreshAfter: refreshAfter,
             progress: progress
         )
@@ -76,15 +101,20 @@ final class SyncSessionController {
         tracks: [AudioTrack],
         playlistName: String,
         settings: SyncSettings,
+        performance: PerformanceSettings = .default,
+        conversion: ConversionSettings = .default,
+        refreshAfterSend: Bool = true,
         activeDestination: URL?,
         mtpReady: Bool = true,
         mtpNotReadyMessage: String = "MTP support is not ready.",
         deviceBrowser: DeviceBrowserStore,
         configureMTP: @escaping () -> Void,
-        onProgress: @escaping @MainActor (Double, String?) -> Void,
+        onProgress: @escaping @MainActor (TransferProgressSnapshot) -> Void,
         onLog: @escaping @MainActor (String) -> Void,
-        onMountedComplete: @escaping @MainActor (URL) -> Void,
-        onMTPComplete: @escaping @MainActor (MTPSyncResult) -> Void
+        onMountedComplete: @escaping @MainActor (SyncResult) -> Void,
+        onMTPComplete: @escaping @MainActor (MTPSyncResult) -> Void,
+        onCancelled: @escaping @MainActor () -> Void = {},
+        onFailed: @escaping @MainActor (Error) -> Void = { _ in }
     ) async {
         syncTask?.cancel()
         guard !tracks.isEmpty else {
@@ -97,16 +127,21 @@ final class SyncSessionController {
                 tracks: tracks,
                 playlistName: playlistName,
                 settings: settings,
+                performance: performance,
+                conversion: conversion,
                 destination: destination,
                 onProgress: onProgress,
                 onLog: onLog,
-                onComplete: onMountedComplete
+                onComplete: onMountedComplete,
+                onCancelled: onCancelled,
+                onFailed: onFailed
             )
             return
         }
 
         guard mtpReady else {
             onLog(mtpNotReadyMessage)
+            onFailed(SyncSessionError.mtpNotReady)
             return
         }
 
@@ -114,11 +149,16 @@ final class SyncSessionController {
             tracks: tracks,
             playlistName: playlistName,
             settings: settings,
+            performance: performance,
+            conversion: conversion,
+            refreshAfterSend: refreshAfterSend,
             deviceBrowser: deviceBrowser,
             configureMTP: configureMTP,
             onProgress: onProgress,
             onLog: onLog,
-            onComplete: onMTPComplete
+            onComplete: onMTPComplete,
+            onCancelled: onCancelled,
+            onFailed: onFailed
         )
     }
 
@@ -126,37 +166,49 @@ final class SyncSessionController {
         tracks: [AudioTrack],
         playlistName: String,
         settings: SyncSettings,
+        performance: PerformanceSettings,
+        conversion: ConversionSettings,
         destination: URL,
-        onProgress: @escaping @MainActor (Double, String?) -> Void,
+        onProgress: @escaping @MainActor (TransferProgressSnapshot) -> Void,
         onLog: @escaping @MainActor (String) -> Void,
-        onComplete: @escaping @MainActor (URL) -> Void
+        onComplete: @escaping @MainActor (SyncResult) -> Void,
+        onCancelled: @escaping @MainActor () -> Void,
+        onFailed: @escaping @MainActor (Error) -> Void
     ) async {
         onLog("Starting sync to \(destination.path)")
         let generation = UUID()
         syncGeneration = generation
         let task = Task { @MainActor in
             do {
-                let preparation = syncCoordinator.prepareTracks(tracks, settings: settings)
+                let preparation = syncCoordinator.prepareTracks(
+                    tracks,
+                    settings: settings,
+                    performance: performance,
+                    conversion: conversion
+                )
                 self.logPreparation(preparation, onLog: onLog)
                 let result = try await syncCoordinator.syncMounted(
                     tracks: preparation.tracks,
                     playlistName: playlistName,
                     destination: destination,
-                    settings: settings
-                ) { progress, message in
+                    settings: settings,
+                    performance: performance
+                ) { snapshot in
                     Task { @MainActor in
-                        onProgress(progress, message)
+                        onProgress(snapshot)
                     }
                 }
                 onLog("Sync complete: copied \(result.copiedCount), skipped \(result.skippedCount), replaced \(result.replacedCount).")
                 if settings.writePlaylist {
                     onLog("Playlist: \(result.playlistURL.lastPathComponent)")
                 }
-                onComplete(destination)
+                onComplete(result)
             } catch is CancellationError {
                 onLog("Sync cancelled.")
+                onCancelled()
             } catch {
                 onLog("Sync failed: \(error.localizedDescription)")
+                onFailed(error)
             }
         }
         syncTask = task
@@ -170,11 +222,16 @@ final class SyncSessionController {
         tracks: [AudioTrack],
         playlistName: String,
         settings: SyncSettings,
+        performance: PerformanceSettings,
+        conversion: ConversionSettings,
+        refreshAfterSend: Bool,
         deviceBrowser: DeviceBrowserStore,
         configureMTP: @escaping () -> Void,
-        onProgress: @escaping @MainActor (Double, String?) -> Void,
+        onProgress: @escaping @MainActor (TransferProgressSnapshot) -> Void,
         onLog: @escaping @MainActor (String) -> Void,
-        onComplete: @escaping @MainActor (MTPSyncResult) -> Void
+        onComplete: @escaping @MainActor (MTPSyncResult) -> Void,
+        onCancelled: @escaping @MainActor () -> Void,
+        onFailed: @escaping @MainActor (Error) -> Void
     ) async {
         onLog("Starting MTP sync to Garmin watch")
         let generation = UUID()
@@ -183,16 +240,22 @@ final class SyncSessionController {
             do {
                 try Task.checkCancellation()
                 configureMTP()
-                onProgress(0.05, nil)
-                if deviceBrowser.hasFreshListing {
-                    onLog("Using recent Garmin library listing for sync plan…")
-                } else {
+                onProgress(.phase(0.05, "Connecting to watch…"))
+                if performance.forceRefreshBeforeSync || !deviceBrowser.hasFreshListing {
                     onLog("Refreshing Garmin library before sync…")
+                    onProgress(.phase(0.06, "Refreshing Garmin library…"))
                     await deviceBrowser.refresh(force: true)
+                } else {
+                    onLog("Using recent Garmin library listing for sync plan…")
                 }
                 try Task.checkCancellation()
 
-                let preparation = syncCoordinator.prepareTracks(tracks, settings: settings)
+                let preparation = syncCoordinator.prepareTracks(
+                    tracks,
+                    settings: settings,
+                    performance: performance,
+                    conversion: conversion
+                )
                 self.logPreparation(preparation, onLog: onLog)
 
                 let plan = MTPSyncPlanner.buildPlan(
@@ -209,20 +272,28 @@ final class SyncSessionController {
                     deviceBrowser: deviceBrowser,
                     playlistName: playlistName,
                     settings: settings,
-                    refreshAfter: true
-                ) { progress, message in
+                    performance: performance,
+                    refreshAfter: refreshAfterSend
+                ) { snapshot in
                     Task { @MainActor in
-                        onProgress(progress, message)
+                        onProgress(snapshot)
                     }
                 }
 
                 if result.wasCancelled {
-                    onLog("MTP sync cancelled after sending \(result.uploadedCount) track(s)\(result.failedCount > 0 ? " (\(result.failedCount) failed before cancel)" : "").")
+                    if result.uploadedCount > 0 {
+                        onLog("MTP sync cancelled after sending \(result.uploadedCount) track(s)\(result.failedCount > 0 ? " (\(result.failedCount) failed before cancel)" : ""). Successful uploads were kept on the watch.")
+                        if result.failedCount > 0 {
+                            onLog("Use Retry / continue send for failed or not-yet-attempted tracks.")
+                        }
+                    } else {
+                        onLog("MTP sync cancelled before any track finished uploading.")
+                    }
                 } else if plan.transferCount == 0 {
                     onLog("MTP sync complete: all \(result.skippedCount) selected track(s) already on the Garmin.")
                 } else if result.failedCount > 0 {
                     onLog("MTP sync partially complete: sent \(result.uploadedCount), skipped \(result.skippedCount), replaced \(result.replacedCount), \(result.failedCount) failed.")
-                    onLog("Use Retry Failed to re-send only the tracks that did not transfer.")
+                    onLog("Use Retry / continue send for tracks that did not transfer.")
                 } else {
                     onLog("MTP sync complete: sent \(result.uploadedCount), skipped \(result.skippedCount), replaced \(result.replacedCount).")
                 }
@@ -232,8 +303,10 @@ final class SyncSessionController {
                 onComplete(result)
             } catch is CancellationError {
                 onLog("MTP sync cancelled.")
+                onCancelled()
             } catch {
                 onLog("MTP sync failed: \(error.localizedDescription)")
+                onFailed(error)
             }
         }
         syncTask = task

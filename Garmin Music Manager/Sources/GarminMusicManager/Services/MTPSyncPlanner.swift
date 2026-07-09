@@ -153,8 +153,12 @@ enum MTPSyncPlanner {
         return components.joined(separator: "/")
     }
 
+    /// Configurable remote music root (Lifecycle settings). Default `Music`.
+    static var remoteMusicRoot: String = "Music"
+
     static func remotePath(for track: AudioTrack, playlistName: String, settings: SyncSettings) -> String {
-        "Music/\(playlistRelativePath(for: track, playlistName: playlistName, settings: settings))"
+        let root = remoteMusicRoot.isEmpty ? "Music" : remoteMusicRoot
+        return "\(root)/\(playlistRelativePath(for: track, playlistName: playlistName, settings: settings))"
     }
 
     static func makeUploadFile(
@@ -174,7 +178,8 @@ enum MTPSyncPlanner {
                 album: track.album ?? cleanPlaylistName,
                 durationSeconds: track.durationSeconds
             ),
-            replaceObjectID: replaceObjectID
+            replaceObjectID: replaceObjectID,
+            clientTrackID: track.id.uuidString
         )
     }
 

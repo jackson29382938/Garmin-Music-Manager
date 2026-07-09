@@ -193,19 +193,38 @@ public struct DeviceUploadFile: Codable, Hashable {
     /// deletes it immediately before sending the replacement, so a failed batch
     /// never leaves earlier tracks deleted without their replacements.
     public var replaceObjectID: String?
+    /// Optional client-side stable ID (e.g. Mac queue track UUID) for retry mapping.
+    /// Not used by the helper; ignored if missing on older payloads.
+    public var clientTrackID: String?
 
     public init(
         localPath: String,
         remotePath: String,
         displayName: String,
         metadata: DeviceAudioMetadata? = nil,
-        replaceObjectID: String? = nil
+        replaceObjectID: String? = nil,
+        clientTrackID: String? = nil
     ) {
         self.localPath = localPath
         self.remotePath = remotePath
         self.displayName = displayName
         self.metadata = metadata
         self.replaceObjectID = replaceObjectID
+        self.clientTrackID = clientTrackID
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        localPath = try container.decode(String.self, forKey: .localPath)
+        remotePath = try container.decode(String.self, forKey: .remotePath)
+        displayName = try container.decode(String.self, forKey: .displayName)
+        metadata = try container.decodeIfPresent(DeviceAudioMetadata.self, forKey: .metadata)
+        replaceObjectID = try container.decodeIfPresent(String.self, forKey: .replaceObjectID)
+        clientTrackID = try container.decodeIfPresent(String.self, forKey: .clientTrackID)
+    }
+
+    public var clientTrackUUID: UUID? {
+        clientTrackID.flatMap(UUID.init(uuidString:))
     }
 }
 
@@ -265,6 +284,10 @@ public struct DeviceOperation: Identifiable, Codable, Hashable {
     public var progress: Double?
     public var canCancel: Bool
     public var lastError: String?
+    /// Zero-based current item when known (MTP transfer events).
+    public var itemIndex: Int?
+    public var itemCount: Int?
+    public var itemName: String?
 
     public init(
         id: UUID = UUID(),
@@ -272,7 +295,10 @@ public struct DeviceOperation: Identifiable, Codable, Hashable {
         phase: String,
         progress: Double? = nil,
         canCancel: Bool = false,
-        lastError: String? = nil
+        lastError: String? = nil,
+        itemIndex: Int? = nil,
+        itemCount: Int? = nil,
+        itemName: String? = nil
     ) {
         self.id = id
         self.kind = kind
@@ -280,5 +306,26 @@ public struct DeviceOperation: Identifiable, Codable, Hashable {
         self.progress = progress
         self.canCancel = canCancel
         self.lastError = lastError
+        self.itemIndex = itemIndex
+        self.itemCount = itemCount
+        self.itemName = itemName
+    }
+
+    /// "3 of 12 · Song.mp3" when structured indices are present.
+    public var itemLabel: String? {
+        guard let itemCount, itemCount > 0, let itemIndex else {
+            if let itemName, !itemName.isEmpty { return itemName }
+            return nil
+        }
+        let n = min(itemIndex + 1, itemCount)
+        if let itemName, !itemName.isEmpty {
+            return "\(n) of \(itemCount) · \(itemName)"
+        }
+        return "\(n) of \(itemCount)"
+    }
+
+    public var primaryLine: String {
+        if let itemLabel { return itemLabel }
+        return phase
     }
 }

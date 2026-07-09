@@ -13,13 +13,19 @@ final class DeviceConnectMonitor {
     /// Minimum interval between automatic refresh triggers.
     private let coalesceInterval: TimeInterval = 2.5
     private var lastFire = Date.distantPast
+    private var pollInterval: TimeInterval = 6
 
     init(onChange: @escaping () -> Void) {
         self.onChange = onChange
     }
 
-    func start() {
+    /// Starts volume mount observers and optional USB polling.
+    /// - Parameters:
+    ///   - pollInterval: USB signature poll period (clamped 3…30s).
+    ///   - pollUSB: When false, only volume mount/unmount notifications fire.
+    func start(pollInterval: TimeInterval = 6, pollUSB: Bool = true) {
         stop()
+        self.pollInterval = min(30, max(3, pollInterval))
         let center = NSWorkspace.shared.notificationCenter
         let names: [NSNotification.Name] = [
             NSWorkspace.didMountNotification,
@@ -35,17 +41,30 @@ final class DeviceConnectMonitor {
             workspaceObservers.append(token)
         }
 
+        lastVolumeSignature = currentVolumeSignature()
+        lastUSBSignature = currentUSBSignature()
+
+        guard pollUSB else { return }
+
         // MTP devices frequently never appear as volumes; poll USB signatures.
-        let timer = Timer.scheduledTimer(withTimeInterval: 6.0, repeats: true) { [weak self] _ in
+        let interval = self.pollInterval
+        let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 self?.poll()
             }
         }
-        timer.tolerance = 1.5
+        timer.tolerance = min(1.5, interval * 0.25)
         RunLoop.main.add(timer, forMode: .common)
         pollTimer = timer
-        lastVolumeSignature = currentVolumeSignature()
-        lastUSBSignature = currentUSBSignature()
+    }
+
+    /// Reconfigure when performance settings change.
+    func reconfigure(enabled: Bool, pollInterval: TimeInterval) {
+        if enabled {
+            start(pollInterval: pollInterval, pollUSB: true)
+        } else {
+            stop()
+        }
     }
 
     func stop() {

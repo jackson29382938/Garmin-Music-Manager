@@ -29,6 +29,23 @@ final class MTPSyncResultTests: XCTestCase {
         XCTAssertEqual(result.failedItems, ["bad.mp3"])
         XCTAssertNil(result.playlistName)
     }
+
+    func testRetryTrackIDsMergesFailedAndRemaining() {
+        let a = UUID()
+        let b = UUID()
+        let c = UUID()
+        let result = MTPSyncResult(
+            uploadedCount: 1,
+            skippedCount: 0,
+            replacedCount: 0,
+            failedCount: 1,
+            wasCancelled: true,
+            failedTrackIDs: [a, b],
+            remainingTrackIDs: [b, c]
+        )
+        XCTAssertEqual(result.retryTrackIDs, [a, b, c])
+        XCTAssertTrue(result.canRetryFailed)
+    }
 }
 
 final class TrackPreparationResultTests: XCTestCase {

@@ -17,6 +17,9 @@ struct AudioConverter {
 
     private let fileManager = FileManager.default
 
+    /// Optional absolute path override (Library/Conversion settings).
+    static var customFFmpegPath: String?
+
     static var temporaryConversionDirectory: URL {
         FileManager.default.temporaryDirectory
             .appendingPathComponent("GarminMusicManager-conversions", isDirectory: true)
@@ -33,7 +36,17 @@ struct AudioConverter {
         }
     }
 
-    func convertToAAC(source: URL) throws -> URL {
+    /// Converts source audio to AAC.
+    /// - Parameters:
+    ///   - bitrateKbps: Target bitrate (64…320).
+    ///   - sampleRate: Optional fixed sample rate; `nil` / `.source` keeps input rate.
+    ///   - reuseExisting: When true, return existing cache file if present.
+    func convertToAAC(
+        source: URL,
+        bitrateKbps: Int = 256,
+        sampleRate: AACSampleRate = .hz44100,
+        reuseExisting: Bool = true
+    ) throws -> URL {
         guard let ffmpegURL else {
             throw ConverterError.ffmpegMissing
         }
@@ -46,21 +59,39 @@ struct AudioConverter {
         )
 
         let stem = source.deletingPathExtension().lastPathComponent
-        let outputURL = outputDirectory.appendingPathComponent("\(stem)-converted.m4a")
+        let rateTag: String
+        switch sampleRate {
+        case .source: rateTag = "src"
+        case .hz44100: rateTag = "44100"
+        case .hz48000: rateTag = "48000"
+        }
+        let outputURL = outputDirectory.appendingPathComponent(
+            "\(stem)-b\(bitrateKbps)-\(rateTag)-converted.m4a"
+        )
+
+        if reuseExisting, fileManager.fileExists(atPath: outputURL.path) {
+            return outputURL
+        }
 
         if fileManager.fileExists(atPath: outputURL.path) {
             try? fileManager.removeItem(at: outputURL)
         }
 
-        let process = Process()
-        process.executableURL = ffmpegURL
-        process.arguments = [
+        let bitrate = min(320, max(64, bitrateKbps))
+        var arguments = [
             "-y",
             "-i", source.path,
             "-c:a", "aac",
-            "-b:a", "256k",
-            outputURL.path
+            "-b:a", "\(bitrate)k"
         ]
+        if sampleRate != .source {
+            arguments += ["-ar", "\(sampleRate.rawValue)"]
+        }
+        arguments.append(outputURL.path)
+
+        let process = Process()
+        process.executableURL = ffmpegURL
+        process.arguments = arguments
 
         let pipe = Pipe()
         process.standardError = pipe
@@ -91,6 +122,13 @@ struct AudioConverter {
     }
 
     private var ffmpegURL: URL? {
+        if let custom = Self.customFFmpegPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !custom.isEmpty {
+            let url = URL(fileURLWithPath: custom)
+            if fileManager.isExecutableFile(atPath: url.path) {
+                return url
+            }
+        }
         let searchPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
         for directory in searchPaths {
             let url = URL(fileURLWithPath: directory).appendingPathComponent("ffmpeg")

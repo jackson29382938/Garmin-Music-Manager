@@ -90,39 +90,85 @@ final class MusicScanner {
         return (audioURLs, playlistsExpanded)
     }
 
-    func scanFiles(_ urls: [URL]) async -> [AudioTrack] {
+    /// - Parameters:
+    ///   - fastImport: Skip AV metadata/duration/codec (name + size only).
+    ///   - maxConcurrency: Cap concurrent scans; `0` or less = unlimited.
+    func scanFiles(
+        _ urls: [URL],
+        fastImport: Bool = false,
+        maxConcurrency: Int = 0
+    ) async -> [AudioTrack] {
         // Never treat playlist files as audio assets.
         let audioOnly = urls.filter { url in
             !Self.supportedPlaylistExtensions.contains(url.pathExtension.lowercased())
         }
-        return await withTaskGroup(of: (Int, AudioTrack).self) { group in
-            for (index, url) in audioOnly.enumerated() {
-                group.addTask {
-                    let track = await self.scanFile(url)
-                    return (index, track)
+        guard !audioOnly.isEmpty else { return [] }
+
+        if maxConcurrency <= 0 {
+            return await withTaskGroup(of: (Int, AudioTrack).self) { group in
+                for (index, url) in audioOnly.enumerated() {
+                    group.addTask {
+                        let track = await self.scanFile(url, fastImport: fastImport)
+                        return (index, track)
+                    }
+                }
+                var indexed: [(Int, AudioTrack)] = []
+                indexed.reserveCapacity(audioOnly.count)
+                for await result in group {
+                    indexed.append(result)
+                }
+                return indexed.sorted { $0.0 < $1.0 }.map(\.1)
+            }
+        }
+
+        var results = Array<AudioTrack?>(repeating: nil, count: audioOnly.count)
+        var nextIndex = 0
+        var active = 0
+        let limit = max(1, maxConcurrency)
+        await withTaskGroup(of: (Int, AudioTrack).self) { group in
+            func enqueueAvailable() {
+                while nextIndex < audioOnly.count, active < limit {
+                    let index = nextIndex
+                    let url = audioOnly[index]
+                    nextIndex += 1
+                    active += 1
+                    group.addTask {
+                        let track = await self.scanFile(url, fastImport: fastImport)
+                        return (index, track)
+                    }
                 }
             }
-
-            var indexed: [(Int, AudioTrack)] = []
-            indexed.reserveCapacity(audioOnly.count)
-            for await result in group {
-                indexed.append(result)
+            enqueueAvailable()
+            for await (index, track) in group {
+                results[index] = track
+                active -= 1
+                enqueueAvailable()
             }
-            return indexed.sorted { $0.0 < $1.0 }.map(\.1)
         }
+        return results.compactMap { $0 }
     }
 
-    func scanFile(_ url: URL) async -> AudioTrack {
+    func scanFile(_ url: URL, fastImport: Bool = false) async -> AudioTrack {
         let ext = url.pathExtension.lowercased()
         let attributes = try? fileManager.attributesOfItem(atPath: url.path)
         let byteCount = (attributes?[.size] as? NSNumber)?.int64Value ?? 0
 
-        let asset = AVURLAsset(url: url)
-        async let durationSeconds = loadDuration(from: asset)
-        async let metadata = loadCommonMetadata(from: asset)
-        async let codec = loadCodecHint(from: asset)
+        let loadedDuration: Double?
+        let loadedMetadata: (title: String?, artist: String?, album: String?)
+        let loadedCodec: String?
 
-        let (loadedDuration, loadedMetadata, loadedCodec) = await (durationSeconds, metadata, codec)
+        if fastImport {
+            loadedDuration = nil
+            loadedMetadata = (nil, nil, nil)
+            loadedCodec = nil
+        } else {
+            let asset = AVURLAsset(url: url)
+            async let durationSeconds = loadDuration(from: asset)
+            async let metadata = loadCommonMetadata(from: asset)
+            async let codec = loadCodecHint(from: asset)
+            (loadedDuration, loadedMetadata, loadedCodec) = await (durationSeconds, metadata, codec)
+        }
+
         let compatibility = MusicCompatibilityEvaluator.evaluate(
             url: url,
             ext: ext,

@@ -2,29 +2,91 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject private var model: AppModel
+    @State private var mode: AppMode = .transfer
+
+    private var showsStickyProgress: Bool {
+        model.isSyncing || model.isManagingDeviceFiles
+    }
 
     var body: some View {
-        NavigationSplitView {
-            SidebarView()
-                .navigationSplitViewColumnWidth(min: 260, ideal: 300, max: 360)
-        } detail: {
-            VStack(spacing: 0) {
-                WorkflowGuideView(steps: model.workflowSteps)
+        VStack(spacing: 0) {
+            modePicker
+            Divider()
+
+            if showsStickyProgress {
+                StickyTransferProgressBar()
                 Divider()
-                HeaderView()
-                Divider()
-                VSplitView {
-                    TrackTableView()
-                        .frame(minHeight: 110)
-                    LibraryFlowConnector()
-                    DeviceContentsView()
-                        .frame(minHeight: 140)
-                }
-                Divider()
-                TransferPanelView()
             }
-            .toolbar {
-                PrimaryActionsToolbar(model: model)
+
+            if let notice = model.userNotice {
+                UserNoticeBanner(
+                    notice: notice,
+                    onAction: { model.performNoticeAction() },
+                    onDismiss: { model.dismissNotice() }
+                )
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+            }
+
+            Group {
+                switch mode {
+                case .transfer:
+                    TransferHomeView()
+                case .onWatch:
+                    OnWatchView()
+                case .settings:
+                    SettingsView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .onAppear {
+            if model.librarySettings.rememberLastAppMode,
+               let saved = AppMode(rawValue: model.librarySettings.lastAppMode) {
+                mode = saved
+            }
+        }
+        .onChange(of: mode) { _, newMode in
+            guard model.librarySettings.rememberLastAppMode else { return }
+            var lib = model.librarySettings
+            lib.lastAppMode = newMode.rawValue
+            model.librarySettings = lib
+        }
+        .toolbar {
+            ToolbarItemGroup(placement: .primaryAction) {
+                if mode == .transfer {
+                    Button {
+                        model.openAppleMusicBrowser()
+                    } label: {
+                        Label("Apple Music", systemImage: "music.note.list")
+                    }
+                    .help("Load and browse your Apple Music library")
+
+                    Button {
+                        model.beginSend()
+                    } label: {
+                        Label("Send to Watch", systemImage: "arrow.down.circle")
+                    }
+                    .disabled(!model.canSync)
+                    .help("Send selected tracks to the Garmin")
+                }
+
+                if model.isSyncing {
+                    Button(role: .destructive) {
+                        model.cancelSync()
+                    } label: {
+                        Label("Cancel Transfer", systemImage: "xmark.circle")
+                    }
+                    .help("Cancel the in-progress transfer")
+                } else if model.isManagingDeviceFiles || model.isBrowsingDevice {
+                    Button(role: .destructive) {
+                        model.cancelDeviceOperation()
+                    } label: {
+                        Label("Cancel", systemImage: "xmark.circle")
+                    }
+                    .help("Cancel the in-progress device operation")
+                }
             }
         }
         .sheet(isPresented: $model.showSyncPreview) {
@@ -57,102 +119,102 @@ struct ContentView: View {
         } message: {
             Text("The files were copied to the new Garmin folder. Delete the original copies to complete the move.")
         }
+        .onChange(of: mode) { _, newMode in
+            if newMode == .onWatch {
+                if model.canAttemptMTP && !model.deviceBrowser.isConfigured {
+                    model.browseGarminMusicLibrary()
+                }
+            }
+        }
+        .onChange(of: model.shouldFocusOnWatch) { _, focus in
+            guard focus else { return }
+            mode = .onWatch
+            model.consumeFocusOnWatch()
+            if model.canAttemptMTP || model.destinationIsReady {
+                if model.canAttemptMTP {
+                    model.browseGarminMusicLibrary(force: false)
+                } else {
+                    model.refreshDeviceContents()
+                }
+            }
+        }
+        .onChange(of: model.shouldFocusTransfer) { _, focus in
+            guard focus else { return }
+            mode = .transfer
+            model.consumeFocusTransfer()
+        }
     }
-}
 
-struct LibraryFlowConnector: View {
-    @EnvironmentObject private var model: AppModel
+    private var modePicker: some View {
+        HStack(spacing: 16) {
+            HStack(spacing: 8) {
+                AppLogoMark(size: 22)
+                Text("Garmin Music")
+                    .font(.headline)
+                    .lineLimit(1)
+            }
 
-    var body: some View {
-        ViewThatFits(in: .horizontal) {
-            fullConnector
-            compactConnector
+            Picker("Mode", selection: $mode) {
+                ForEach(AppMode.allCases) { appMode in
+                    Label(appMode.title, systemImage: appMode.systemImage)
+                        .tag(appMode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 420)
+
+            Spacer(minLength: 0)
+
+            connectionPill
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
         .background(.bar)
     }
 
-    private var fullConnector: some View {
-        HStack(spacing: 16) {
-            Label("Mac", systemImage: "laptopcomputer")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(AppTheme.panelAccent(for: .mac))
-
-            Image(systemName: "arrow.down.circle.fill")
-                .font(.title2)
-                .foregroundStyle(AppTheme.panelAccent(for: .garmin))
-
-            Label("Garmin", systemImage: "applewatch")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(AppTheme.panelAccent(for: .garmin))
-
-            Spacer()
-
-            if let reason = model.uploadDisabledReason, !model.canUploadSelectedTracksToDevice {
-                Text(reason)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .frame(maxWidth: 280, alignment: .trailing)
-            }
-
-            sendSelectedButton
-            copyToMacButton
-        }
-    }
-
-    private var compactConnector: some View {
-        HStack(spacing: 10) {
-            Label("Mac to Garmin", systemImage: "arrow.down.circle.fill")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(AppTheme.panelAccent(for: .garmin))
+    private var connectionPill: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(connectionPillColor)
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            Text(connectionPillText)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.secondary)
                 .lineLimit(1)
-
-            if let reason = model.uploadDisabledReason, !model.canUploadSelectedTracksToDevice {
-                Text(reason)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            } else {
-                Spacer(minLength: 0)
-            }
-
-            Menu {
-                sendSelectedButton
-                copyToMacButton
-            } label: {
-                Label("Transfer", systemImage: "ellipsis.circle")
-            }
-            .menuStyle(.button)
         }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(Color.primary.opacity(0.05), in: Capsule())
+        .help(model.destinationDescription)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Connection: \(connectionPillText)")
     }
 
-    private var sendSelectedButton: some View {
-        Button {
-            model.uploadSelectedTracksToDevice()
-        } label: {
-            Label("Send Selected to Garmin", systemImage: "arrow.down.to.line.compact")
-        }
-        .buttonStyle(.borderedProminent)
-        .controlSize(.regular)
-        .disabled(!model.canUploadSelectedTracksToDevice)
-        .help("Quick-send selected Mac tracks using your current sync settings")
+    private var connectionPillColor: Color {
+        if model.destinationIsReady { return .green }
+        if !model.connectedUSBDevices.isEmpty { return .orange }
+        return .secondary
     }
 
-    private var copyToMacButton: some View {
-        Button {
-            model.copySelectedDeviceFilesToMac()
-        } label: {
-            Label("Copy to Mac", systemImage: "arrow.up.to.line.compact")
+    private var connectionPillText: String {
+        if model.isSyncing, let snapshot = model.transferProgress {
+            return snapshot.itemLabel ?? "Sending \(snapshot.percentLabel)"
         }
-        .controlSize(.regular)
-        .disabled(model.deviceBrowser.selectedFileIDs.isEmpty || model.isManagingDeviceFiles)
-        .help("Copy selected Garmin files to a folder on this Mac")
+        if model.destinationIsReady {
+            return model.connectedMTPDeviceName
+                ?? model.connectedUSBDevices.first?.displayName
+                ?? model.selectedDevice?.volumeName
+                ?? "Connected"
+        }
+        if !model.connectedUSBDevices.isEmpty {
+            return model.mtpDependencyStatus.isReady ? "Detected" : "Needs MTP"
+        }
+        return "Not connected"
     }
 }
+
+// MARK: - Sheets shared with On Watch
 
 private struct MoveWithinGarminSheet: View {
     @EnvironmentObject private var model: AppModel

@@ -1,9 +1,12 @@
+import AppKit
 import GarminMusicCore
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct DeviceContentsView: View {
     @EnvironmentObject private var model: AppModel
+    /// When embedded under On Watch, the parent already provides title/refresh.
+    var showsPanelHeader: Bool = true
     @State private var isUploadDropTarget = false
     @State private var availableWidth: CGFloat = 0
 
@@ -17,19 +20,25 @@ struct DeviceContentsView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            toolbar
+            DeviceContentsToolbar(
+                showsPanelHeader: showsPanelHeader,
+                usesCompactLayout: usesCompactLayout,
+                summaryText: summaryText,
+                chips: garminHeaderChips,
+                onRefresh: refreshDeviceLibrary
+            )
             Divider()
 
             if let operation = browser.operation {
-                OperationBanner(operation: operation) {
+                DeviceOperationBanner(operation: operation) {
                     model.cancelDeviceOperation()
                 }
                 Divider()
             } else if let error = browser.lastError {
-                StatusBanner(message: error, systemImage: "exclamationmark.triangle", tint: .orange)
+                DeviceStatusBanner(message: error, systemImage: "exclamationmark.triangle", tint: .orange)
                 Divider()
             } else if browser.browseMode == .advancedStorage {
-                StatusBanner(
+                DeviceStatusBanner(
                     message: "Advanced storage is visible. Destructive changes outside music folders always require confirmation.",
                     systemImage: "exclamationmark.triangle",
                     tint: .orange
@@ -39,8 +48,9 @@ struct DeviceContentsView: View {
 
             if !browser.isConfigured {
                 emptyState(
-                    title: "Step 1: Connect your Garmin",
-                    message: browser.statusMessage ?? "Connect via USB and click Refresh in the sidebar, or choose a custom folder."
+                    title: "Connect your Garmin",
+                    message: browser.statusMessage
+                        ?? "Connect via USB and click Refresh above, or choose a music folder in Transfer or Settings."
                 )
             } else if browser.isRefreshing && browser.files.isEmpty {
                 loadingState
@@ -48,8 +58,8 @@ struct DeviceContentsView: View {
                 emptyState(
                     title: emptyBrowserTitle,
                     message: browser.statusMessage ?? (browser.backendKind == .mtp
-                        ? "Sync a playlist below, or drop tracks here to add directly."
-                        : "Drop tracks here or use Add to Garmin.")
+                        ? "Nothing here yet. Prefer Transfer → Send to Watch for playlists and conversion. Add/drop here only puts files on the watch (no playlist)."
+                        : "Drop tracks here or use Add (direct copy — no playlist). Prefer Transfer for full Send to Watch.")
                 )
             } else {
                 browserContent
@@ -73,9 +83,24 @@ struct DeviceContentsView: View {
                     .padding(4)
             }
         }
-        .onDrop(of: [.fileURL], isTargeted: $isUploadDropTarget) { providers in
+        .onDrop(
+            of: [.fileURL],
+            isTargeted: canAcceptUploadDrop ? $isUploadDropTarget : .constant(false)
+        ) { providers in
             handleUploadDrop(providers)
         }
+        .contextMenu {
+            if browser.isConfigured {
+                deviceBackgroundContextMenu
+            }
+        }
+    }
+
+    private var canAcceptUploadDrop: Bool {
+        browser.isConfigured
+            && !model.isManagingDeviceFiles
+            && !browser.isRefreshing
+            && browser.browseMode != .advancedStorage
     }
 
     private var emptyBrowserTitle: String {
@@ -101,33 +126,6 @@ struct DeviceContentsView: View {
         }
     }
 
-    private var toolbar: some View {
-        VStack(spacing: 0) {
-            PanelHeader(
-                side: .garmin,
-                title: "Garmin Library",
-                subtitle: summaryText,
-                systemImage: "applewatch",
-                chips: garminHeaderChips
-            ) {
-                HStack(spacing: 8) {
-                    if model.advancedStorageExplorerEnabled {
-                        Picker("Browse mode", selection: Binding(
-                            get: { browser.browseMode },
-                            set: { model.switchDeviceBrowseMode(to: $0) }
-                        )) {
-                            Text("Music").tag(DeviceBrowseMode.musicOnly)
-                            Text("Storage").tag(DeviceBrowseMode.advancedStorage)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: usesCompactLayout ? 140 : 160)
-                    }
-                    deviceActions
-                }
-            }
-        }
-    }
-
     private var garminHeaderChips: [String] {
         guard browser.isConfigured else { return [] }
         var chips = ["\(browser.displayedFiles.count) shown"]
@@ -137,82 +135,14 @@ struct DeviceContentsView: View {
         return chips
     }
 
-    private var deviceActions: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 8) {
-                refreshButton
-                copyToMacButton
-                addToGarminButton
-                moveButton
-                deleteButton
-            }
-
-            Menu {
-                refreshButton
-                copyToMacButton
-                addToGarminButton
-                moveButton
-                deleteButton
-            } label: {
-                Label("Actions", systemImage: "ellipsis.circle")
-            }
+    private func refreshDeviceLibrary() {
+        if browser.backendKind == .mtp || model.canAttemptMTP {
+            model.browseGarminMusicLibrary()
+        } else if model.activeDestination == nil {
+            model.refreshDevices()
+        } else {
+            model.refreshDeviceContents()
         }
-    }
-
-    private var refreshButton: some View {
-        Button {
-            if browser.backendKind == .mtp || model.canAttemptMTP {
-                model.browseGarminMusicLibrary()
-            } else if model.activeDestination == nil {
-                model.refreshDevices()
-            } else {
-                model.refreshDeviceContents()
-            }
-        } label: {
-            Label("Refresh", systemImage: "arrow.clockwise")
-        }
-        .disabled(browser.isRefreshing || model.isManagingDeviceFiles)
-        .help("Refresh the Garmin file list")
-    }
-
-    private var copyToMacButton: some View {
-        Button {
-            model.copySelectedDeviceFilesToMac()
-        } label: {
-            Label("Copy to Mac", systemImage: "square.and.arrow.down")
-        }
-        .disabled(browser.selectedFileIDs.isEmpty || model.isManagingDeviceFiles)
-        .help("Copy selected files to this Mac")
-    }
-
-    private var addToGarminButton: some View {
-        Button {
-            model.chooseFilesToUploadToDevice()
-        } label: {
-            Label("Add to Garmin", systemImage: "plus")
-        }
-        .disabled(!browser.isConfigured || model.isManagingDeviceFiles || browser.browseMode == .advancedStorage)
-        .help("Add music files to the Garmin")
-    }
-
-    private var moveButton: some View {
-        Button {
-            model.startMoveSelectedWithinGarmin()
-        } label: {
-            Label("Move Within Garmin", systemImage: "folder")
-        }
-        .disabled(!model.canMoveSelectedDeviceFiles)
-        .help("Move selected files to another Garmin folder")
-    }
-
-    private var deleteButton: some View {
-        Button(role: .destructive) {
-            model.requestDeleteSelectedDeviceFiles()
-        } label: {
-            Label("Delete", systemImage: "trash")
-        }
-        .disabled(browser.selectedFileIDs.isEmpty || model.isManagingDeviceFiles)
-        .help("Delete selected Garmin files")
     }
 
     private var collectionSidebar: some View {
@@ -225,11 +155,32 @@ struct DeviceContentsView: View {
 
             List(selection: $model.deviceBrowser.selectedCollectionID) {
                 ForEach(browser.collections) { collection in
-                    CollectionRow(collection: collection)
+                    DeviceCollectionRow(collection: collection)
                         .tag(collection.id)
+                        .contextMenu {
+                            Button {
+                                model.deviceBrowser.selectedCollectionID = collection.id
+                            } label: {
+                                Label("Show This Collection", systemImage: "folder")
+                            }
+                            Button {
+                                refreshDeviceLibrary()
+                            } label: {
+                                Label("Refresh Library", systemImage: "arrow.clockwise")
+                            }
+                            .disabled(browser.isRefreshing || model.isManagingDeviceFiles)
+                        }
                 }
             }
             .listStyle(.sidebar)
+            .contextMenu {
+                Button {
+                    refreshDeviceLibrary()
+                } label: {
+                    Label("Refresh Library", systemImage: "arrow.clockwise")
+                }
+                .disabled(browser.isRefreshing || model.isManagingDeviceFiles)
+            }
         }
         .frame(width: 220)
     }
@@ -337,6 +288,8 @@ struct DeviceContentsView: View {
         Table(browser.displayedFiles, selection: $model.deviceBrowser.selectedFileIDs) {
             TableColumn("Name") { file in
                 fileNameLabel(for: file)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                     .contextMenu {
                         fileContextMenu(for: file)
                     }
@@ -347,6 +300,7 @@ struct DeviceContentsView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .contextMenu { fileContextMenu(for: file) }
             }
 
             TableColumn("Location") { file in
@@ -354,19 +308,25 @@ struct DeviceContentsView: View {
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
                     .truncationMode(.middle)
+                    .contextMenu { fileContextMenu(for: file) }
             }
 
             TableColumn("Size") { file in
                 Text(ByteCountFormatter.string(fromByteCount: file.size, countStyle: .file))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .contextMenu { fileContextMenu(for: file) }
             }
 
             TableColumn("Type") { file in
                 Text(typeText(for: file))
                     .foregroundStyle(.secondary)
                     .lineLimit(1)
+                    .contextMenu { fileContextMenu(for: file) }
             }
+        }
+        .contextMenu {
+            deviceBackgroundContextMenu
         }
     }
 
@@ -388,6 +348,8 @@ struct DeviceContentsView: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
                 .contextMenu {
                     fileContextMenu(for: file)
                 }
@@ -402,7 +364,11 @@ struct DeviceContentsView: View {
                 .foregroundStyle(.secondary)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .trailing)
+                .contextMenu { fileContextMenu(for: file) }
             }
+        }
+        .contextMenu {
+            deviceBackgroundContextMenu
         }
     }
 
@@ -412,29 +378,115 @@ struct DeviceContentsView: View {
             .truncationMode(.middle)
     }
 
+    /// Finder-style: right-click outside the selection selects only that file;
+    /// right-click inside the selection keeps multi-select for the action.
+    private func prepareDeviceSelection(for file: DeviceFile) {
+        if !model.deviceBrowser.selectedFileIDs.contains(file.id) {
+            model.deviceBrowser.selectedFileIDs = [file.id]
+        }
+    }
+
     @ViewBuilder
     private func fileContextMenu(for file: DeviceFile) -> some View {
         Button {
-            model.deviceBrowser.selectedFileIDs = [file.id]
+            prepareDeviceSelection(for: file)
             model.copySelectedDeviceFilesToMac()
         } label: {
             Label("Copy to Mac", systemImage: "square.and.arrow.down")
         }
+        .disabled(model.isManagingDeviceFiles)
 
         Button {
-            model.deviceBrowser.selectedFileIDs = [file.id]
+            prepareDeviceSelection(for: file)
             model.startMoveSelectedWithinGarmin()
         } label: {
             Label("Move Within Garmin", systemImage: "folder")
         }
-        .disabled(file.type == .folder || model.isManagingDeviceFiles)
+        .disabled(model.isManagingDeviceFiles || file.type == .folder)
 
         Button(role: .destructive) {
-            model.deviceBrowser.selectedFileIDs = [file.id]
+            prepareDeviceSelection(for: file)
             model.requestDeleteSelectedDeviceFiles()
         } label: {
-            Label("Delete", systemImage: "trash")
+            Label("Delete…", systemImage: "trash")
         }
+        .disabled(model.isManagingDeviceFiles)
+
+        Divider()
+
+        Button("Select All Shown") {
+            model.deviceBrowser.selectedFileIDs = Set(browser.displayedFiles.map(\.id))
+        }
+        .disabled(browser.displayedFiles.isEmpty)
+
+        Button("Deselect") {
+            model.deviceBrowser.selectedFileIDs.removeAll()
+        }
+        .disabled(browser.selectedFileIDs.isEmpty)
+
+        Button {
+            refreshDeviceLibrary()
+        } label: {
+            Label("Refresh", systemImage: "arrow.clockwise")
+        }
+        .disabled(browser.isRefreshing || model.isManagingDeviceFiles)
+
+        Divider()
+
+        Button {
+            copyToPasteboard(file.name)
+        } label: {
+            Label("Copy Name", systemImage: "doc.on.doc")
+        }
+
+        Button {
+            let path = file.path.isEmpty ? file.name : file.path
+            copyToPasteboard(path)
+        } label: {
+            Label("Copy Path", systemImage: "link")
+        }
+
+        Divider()
+
+        Button {
+            model.chooseFilesToUploadToDevice()
+        } label: {
+            Label("Add files (no playlist)…", systemImage: "plus")
+        }
+        .disabled(!browser.isConfigured || model.isManagingDeviceFiles || browser.browseMode == .advancedStorage)
+    }
+
+    @ViewBuilder
+    private var deviceBackgroundContextMenu: some View {
+        Button {
+            refreshDeviceLibrary()
+        } label: {
+            Label("Refresh", systemImage: "arrow.clockwise")
+        }
+        .disabled(browser.isRefreshing || model.isManagingDeviceFiles)
+
+        Button {
+            model.chooseFilesToUploadToDevice()
+        } label: {
+            Label("Add files (no playlist)…", systemImage: "plus")
+        }
+        .disabled(!browser.isConfigured || model.isManagingDeviceFiles || browser.browseMode == .advancedStorage)
+
+        if !browser.displayedFiles.isEmpty {
+            Divider()
+            Button("Select All Shown") {
+                model.deviceBrowser.selectedFileIDs = Set(browser.displayedFiles.map(\.id))
+            }
+            Button("Deselect") {
+                model.deviceBrowser.selectedFileIDs.removeAll()
+            }
+            .disabled(browser.selectedFileIDs.isEmpty)
+        }
+    }
+
+    private func copyToPasteboard(_ string: String) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(string, forType: .string)
     }
 
     private var unmatchedRows: some View {
@@ -531,15 +583,29 @@ struct DeviceContentsView: View {
     @ViewBuilder
     private var emptyStateAction: some View {
         if !browser.isConfigured {
-            Button("Refresh Devices") {
-                model.refreshDevices()
+            HStack(spacing: 8) {
+                Button("Refresh") {
+                    model.refreshDevices()
+                }
+                .buttonStyle(.bordered)
+                if !model.mtpDependencyStatus.isReady, model.mtpDependencyStatus.canInstallViaHomebrew {
+                    Button("Install MTP") {
+                        model.installMTPDependencies()
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(model.isInstallingMTPDependencies)
+                }
+                Button("Choose folder…") {
+                    model.chooseCustomGarminFolder()
+                }
+                .buttonStyle(.bordered)
             }
-            .buttonStyle(.bordered)
         } else if browser.files.isEmpty {
-            Button("Add to Garmin") {
+            Button("Add files (no playlist)") {
                 model.chooseFilesToUploadToDevice()
             }
             .buttonStyle(.bordered)
+            .help("Direct upload without playlist, convert, or overwrite policies. Use Transfer → Send to Watch for full send.")
             .disabled(!browser.isConfigured || browser.browseMode == .advancedStorage)
         }
     }
@@ -559,25 +625,10 @@ struct DeviceContentsView: View {
     }
 
     private func handleUploadDrop(_ providers: [NSItemProvider]) -> Bool {
-        guard !providers.isEmpty else { return false }
+        guard canAcceptUploadDrop, !providers.isEmpty else { return false }
 
-        var urls: [URL] = []
-        let lock = NSLock()
-        let group = DispatchGroup()
-
-        for provider in providers {
-            group.enter()
-            _ = provider.loadObject(ofClass: URL.self) { url, _ in
-                if let url {
-                    lock.lock()
-                    urls.append(url)
-                    lock.unlock()
-                }
-                group.leave()
-            }
-        }
-
-        group.notify(queue: .main) {
+        MultiFileDragPayload.loadURLs(from: providers) { urls in
+            guard !urls.isEmpty else { return }
             model.uploadFilesToDevice(urls)
         }
         return true
@@ -622,109 +673,4 @@ struct DeviceContentsView: View {
     }
 }
 
-private struct CollectionRow: View {
-    let collection: DeviceCollection
 
-    var body: some View {
-        Label {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(collection.name)
-                    .lineLimit(1)
-                Text("\(collection.totalItemCount) item(s)")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-            }
-        } icon: {
-            Image(systemName: systemImage)
-        }
-    }
-
-    private var systemImage: String {
-        switch collection.kind {
-        case .allMusic:
-            return "music.note.list"
-        case .playlist:
-            return "list.bullet.rectangle"
-        case .album:
-            return "opticaldisc"
-        case .folder:
-            return "folder"
-        }
-    }
-}
-
-private struct OperationBanner: View {
-    let operation: DeviceOperation
-    var onCancel: (() -> Void)?
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 8) {
-                if operation.lastError == nil {
-                    if operation.progress == nil {
-                        ProgressView()
-                            .controlSize(.small)
-                    } else {
-                        Image(systemName: "arrow.triangle.2.circlepath")
-                            .foregroundStyle(.secondary)
-                    }
-                } else {
-                    Image(systemName: "exclamationmark.triangle")
-                        .foregroundStyle(.orange)
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(operation.phase)
-                        .font(.caption.bold())
-                        .lineLimit(2)
-                    if let lastError = operation.lastError {
-                        Text(lastError)
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                            .lineLimit(2)
-                    } else if let progress = operation.progress {
-                        Text("\(Int((progress * 100).rounded()))%")
-                            .font(.caption2.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                }
-
-                Spacer()
-
-                if operation.canCancel, operation.lastError == nil, let onCancel {
-                    Button("Cancel", action: onCancel)
-                        .controlSize(.small)
-                }
-            }
-
-            if let progress = operation.progress, operation.lastError == nil {
-                ProgressView(value: progress)
-                    .controlSize(.small)
-            }
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.quaternary.opacity(0.3))
-    }
-}
-
-private struct StatusBanner: View {
-    let message: String
-    let systemImage: String
-    let tint: Color
-
-    var body: some View {
-        HStack(spacing: 8) {
-            Image(systemName: systemImage)
-                .foregroundStyle(tint)
-            Text(message)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .lineLimit(2)
-            Spacer()
-        }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
-        .background(.quaternary.opacity(0.25))
-    }
-}

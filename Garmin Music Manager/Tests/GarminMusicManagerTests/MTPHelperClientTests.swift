@@ -20,6 +20,34 @@ private struct FakeTransport: MTPHelperTransport {
     }
 }
 
+/// Returns a sequence of responses (one per `send` call). Used for multi-chunk / retry tests.
+private final class SequencedFakeTransport: MTPHelperTransport, @unchecked Sendable {
+    private let lock = NSLock()
+    private var results: [Result<Data, Error>]
+    private(set) var sendCount = 0
+
+    init(results: [Result<Data, Error>]) {
+        self.results = results
+    }
+
+    func send(
+        _ requestData: Data,
+        timeout: TimeInterval,
+        onProgress: (@Sendable (MTPProgressEvent) -> Void)?
+    ) async throws -> Data {
+        _ = requestData
+        _ = timeout
+        _ = onProgress
+        lock.lock()
+        defer { lock.unlock() }
+        sendCount += 1
+        guard !results.isEmpty else {
+            throw DeviceFileSystemError.helperFailed("No more sequenced results.")
+        }
+        return try results.removeFirst().get()
+    }
+}
+
 final class MTPHelperClientTests: XCTestCase {
     private func encoded(_ response: MTPHelperResponse) throws -> Data {
         let encoder = JSONEncoder()
@@ -205,6 +233,96 @@ final class MTPHelperClientTests: XCTestCase {
         } catch {
             XCTFail("Expected CancellationError, got \(error)")
         }
+    }
+
+    func testCancelledWithPartialSuccessReturnsOperationResult() async throws {
+        let partial = DeviceFileOperationResult(
+            completedCount: 2,
+            failedItems: ["c.mp3"],
+            message: "Cancelled after 2 file(s) uploaded; 1 failed.",
+            uploadedFiles: [
+                DeviceUploadedObject(displayName: "a.mp3", remotePath: "Music/a.mp3", size: 1, objectID: "1"),
+                DeviceUploadedObject(displayName: "b.mp3", remotePath: "Music/b.mp3", size: 1, objectID: "2")
+            ]
+        )
+        let data = try encoded(MTPHelperResponse(
+            ok: false,
+            operationResult: partial,
+            error: MTPHelperError(code: "cancelled", message: "Transfer cancelled.")
+        ))
+        let client = MTPHelperClient(transport: FakeTransport(result: .success(data)))
+
+        let result = try await client.operationResult(request: MTPHelperRequest(operation: .upload))
+        XCTAssertEqual(result.completedCount, 2)
+        XCTAssertEqual(result.uploadedFiles.count, 2)
+        XCTAssertEqual(result.failedItems, ["c.mp3"])
+    }
+
+    func testUploadInChunksAggregatesResults() async throws {
+        // Force small chunks by configuring the shared setting, then create a client
+        // that uses a sequenced transport with two per-chunk responses.
+        MTPHelperClient.configure(uploadChunkSize: 2, idleTimeout: 90)
+
+        let chunk1 = DeviceFileOperationResult(
+            completedCount: 2,
+            failedItems: [],
+            message: "2 file(s) uploaded.",
+            uploadedFiles: [
+                DeviceUploadedObject(displayName: "a.mp3", remotePath: "Music/a.mp3", size: 1, objectID: "1"),
+                DeviceUploadedObject(displayName: "b.mp3", remotePath: "Music/b.mp3", size: 1, objectID: "2")
+            ]
+        )
+        let chunk2 = DeviceFileOperationResult(
+            completedCount: 1,
+            failedItems: ["d.mp3"],
+            message: "1 file(s) uploaded; 1 failed.",
+            uploadedFiles: [
+                DeviceUploadedObject(displayName: "c.mp3", remotePath: "Music/c.mp3", size: 1, objectID: "3")
+            ]
+        )
+        let transport = SequencedFakeTransport(results: [
+            .success(try encoded(MTPHelperResponse(ok: true, operationResult: chunk1))),
+            .success(try encoded(MTPHelperResponse(ok: true, operationResult: chunk2)))
+        ])
+        let client = MTPHelperClient(transport: transport)
+        // Instance may still use configured chunk size from configure().
+        XCTAssertEqual(client.uploadChunkSize, 2)
+
+        let files = ["a", "b", "c", "d"].map {
+            DeviceUploadFile(localPath: "/tmp/\($0).mp3", remotePath: "Music/\($0).mp3", displayName: "\($0).mp3")
+        }
+        let result = try await client.operationResult(
+            request: MTPHelperRequest(operation: .upload, uploadFiles: files)
+        )
+
+        XCTAssertEqual(transport.sendCount, 2)
+        XCTAssertEqual(result.completedCount, 3)
+        XCTAssertEqual(result.failedItems, ["d.mp3"])
+        XCTAssertEqual(result.uploadedFiles.count, 3)
+
+        // Restore defaults for other tests.
+        MTPHelperClient.configure(uploadChunkSize: 5, idleTimeout: 90)
+    }
+
+    func testTransientErrorRetriesThenSucceeds() async throws {
+        let success = DeviceFileOperationResult(completedCount: 1, failedItems: [], message: "1 file(s) uploaded.")
+        let transport = SequencedFakeTransport(results: [
+            .success(try encoded(MTPHelperResponse(
+                ok: false,
+                error: MTPHelperError(code: "device-busy", message: "The Garmin is busy.")
+            ))),
+            .success(try encoded(MTPHelperResponse(ok: true, operationResult: success)))
+        ])
+        let client = MTPHelperClient(transport: transport)
+
+        let result = try await client.operationResult(
+            request: MTPHelperRequest(
+                operation: .upload,
+                uploadFiles: [DeviceUploadFile(localPath: "/tmp/a.mp3", remotePath: "Music/a.mp3", displayName: "a.mp3")]
+            )
+        )
+        XCTAssertEqual(result.completedCount, 1)
+        XCTAssertEqual(transport.sendCount, 2)
     }
 }
 

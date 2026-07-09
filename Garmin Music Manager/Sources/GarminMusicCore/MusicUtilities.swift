@@ -184,6 +184,12 @@ public enum MusicCompatibilityEvaluator {
         "aif", "aiff", "alac", "flac", "m4p", "ogg", "opus", "wma"
     ]
 
+    /// Configurable large-file warning threshold (bytes). Default 250 MB (decimal).
+    public static var largeFileWarningBytes: Int64 = 250_000_000
+
+    /// When true, WAV is treated as needing conversion (if convert toggle / compress path is on).
+    public static var convertWAV = false
+
     public static func evaluate(
         url: URL,
         ext: String,
@@ -228,7 +234,7 @@ public enum MusicCompatibilityEvaluator {
             messages.append("Missing artist tag")
         }
 
-        if byteCount > 250_000_000 {
+        if largeFileWarningBytes > 0, byteCount > largeFileWarningBytes {
             messages.append("Large file; consider compressing before copying")
         }
 
@@ -244,6 +250,7 @@ public enum MusicCompatibilityEvaluator {
     public static func needsConversion(ext: String, codecHint: String?) -> Bool {
         if ext == "flac" || ext == "alac" { return true }
         if (ext == "m4a" || ext == "m4b"), codecHint?.lowercased() == "alac" { return true }
+        if convertWAV, ext == "wav" { return true }
         return false
     }
 }

@@ -3,18 +3,23 @@ import GarminMusicCore
 
 /// Shared rules for “same track already on device” (sync skip + UI duplicate badges).
 enum TrackMatching {
+    /// App-level match mode (Library settings).
+    static var matchMode: DuplicateMatchMode = .smart
+    /// Duration window for smart matching.
+    static var durationToleranceSeconds: Double = 1.5
+
     /// Size must match exactly when both sides report a positive size.
     static func sizesMatch(local: Int64, remote: Int64) -> Bool {
         guard local > 0, remote > 0 else { return false }
         return local == remote
     }
 
-    /// Duration within ±1.5s when both are known.
+    /// Duration within configured tolerance when both are known.
     static func durationsMatch(local: Double?, remote: Double?) -> Bool {
         guard let local, let remote, local.isFinite, remote.isFinite, local > 0, remote > 0 else {
             return false
         }
-        return abs(local - remote) <= 1.5
+        return abs(local - remote) <= durationToleranceSeconds
     }
 
     static func namesMatch(localFileName: String, remoteFileName: String) -> Bool {
@@ -50,10 +55,12 @@ enum TrackMatching {
     ) -> Bool {
         let sizeOK = sizesMatch(local: localByteCount, remote: existingSize)
 
-        // Strongest: filename + size (original rule).
+        // Strongest / only mode for nameAndSize: filename + size.
         if sizeOK, namesMatch(localFileName: localFileName, remoteFileName: existingName) {
             return true
         }
+
+        guard matchMode == .smart else { return false }
 
         // Metadata: title + artist + size (handles renames on disk).
         if sizeOK,
@@ -91,6 +98,7 @@ enum TrackMatching {
     static func deviceFingerprintKeys(for file: DeviceFile) -> [String] {
         var keys: [String] = []
         keys.append("name|\(file.name.lowercased())|\(file.size)")
+        guard matchMode == .smart else { return keys }
         if let title = file.audioMetadata?.title?.nilIfEmpty?.lowercased() {
             let artist = file.audioMetadata?.artist?.nilIfEmpty?.lowercased() ?? ""
             keys.append("meta|\(artist)|\(title)|\(file.size)")
@@ -106,6 +114,7 @@ enum TrackMatching {
         let safe = FileNameSanitizer.safeFileName(for: track).lowercased()
         keys.append("name|\(safe)|\(track.byteCount)")
         keys.append("name|\(track.fileName.lowercased())|\(track.byteCount)")
+        guard matchMode == .smart else { return keys }
         if let title = track.title?.nilIfEmpty?.lowercased() {
             let artist = track.artist?.nilIfEmpty?.lowercased() ?? ""
             keys.append("meta|\(artist)|\(title)|\(track.byteCount)")

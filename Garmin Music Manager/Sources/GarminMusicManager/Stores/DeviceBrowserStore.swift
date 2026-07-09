@@ -17,11 +17,19 @@ final class DeviceBrowserStore: ObservableObject {
     @Published var isRefreshing = false
     @Published var operation: DeviceOperation?
     @Published var lastError: String?
+    /// Structured code for the last error when known (e.g. `"device-busy"`).
+    @Published var lastErrorCode: String?
     @Published var statusMessage: String?
     @Published var deviceName: String?
 
+    var isLastErrorDeviceBusy: Bool {
+        lastErrorCode == "device-busy"
+    }
+
     /// Listings fresher than this can be reused for MTP sync planning without a forced re-list.
-    static let freshListingTTL: TimeInterval = 120
+    /// Default matches historical behavior (120s). `0` means never reuse.
+    static let defaultListingReuseTTL: TimeInterval = 120
+    var listingReuseTTL: TimeInterval = DeviceBrowserStore.defaultListingReuseTTL
 
     private var backend: DeviceFileSystem?
     private var cache: [CacheKey: DeviceFileSystemSnapshot] = [:]
@@ -33,8 +41,9 @@ final class DeviceBrowserStore: ObservableObject {
 
     /// True when the in-memory device file list is non-empty and recently refreshed.
     var hasFreshListing: Bool {
+        guard listingReuseTTL > 0 else { return false }
         guard !files.isEmpty, let lastSuccessfulRefresh else { return false }
-        return Date().timeIntervalSince(lastSuccessfulRefresh) < Self.freshListingTTL
+        return Date().timeIntervalSince(lastSuccessfulRefresh) < listingReuseTTL
     }
 
     var isConfigured: Bool {
@@ -96,6 +105,7 @@ final class DeviceBrowserStore: ObservableObject {
             selectedFileIDs.removeAll()
             selectedCollectionID = browseMode == .advancedStorage ? "all-storage" : "all-music"
             lastError = nil
+            lastErrorCode = nil
             statusMessage = nil
         }
         self.backend = backend
@@ -113,6 +123,7 @@ final class DeviceBrowserStore: ObservableObject {
         isRefreshing = false
         operation = nil
         lastError = nil
+        lastErrorCode = nil
         statusMessage = message
         deviceName = nil
         lastSuccessfulRefresh = nil
@@ -144,6 +155,7 @@ final class DeviceBrowserStore: ObservableObject {
 
         isRefreshing = true
         lastError = nil
+        lastErrorCode = nil
         operation = DeviceOperation(
             kind: .refresh,
             phase: browseMode == .advancedStorage ? "Reading Garmin storage" : "Reading Garmin music",
@@ -233,7 +245,10 @@ final class DeviceBrowserStore: ObservableObject {
             kind: kind,
             phase: event.displayMessage,
             progress: event.overallFraction,
-            canCancel: backendKind == .mtp
+            canCancel: backendKind == .mtp,
+            itemIndex: event.itemIndex,
+            itemCount: event.itemCount,
+            itemName: event.itemName
         )
     }
 
@@ -459,6 +474,7 @@ final class DeviceBrowserStore: ObservableObject {
         deviceName = snapshot.deviceName ?? deviceName
         statusMessage = snapshot.diagnosticMessage
         lastError = nil
+        lastErrorCode = nil
         lastSuccessfulRefresh = Date()
 
         let validIDs = Set(files.map(\.id))
@@ -471,11 +487,13 @@ final class DeviceBrowserStore: ObservableObject {
     private func applyOperationResult(_ result: DeviceFileOperationResult, kind: DeviceOperationKind, successMessage: String) {
         if result.failedItems.isEmpty {
             lastError = nil
+            lastErrorCode = nil
             statusMessage = result.message ?? successMessage
             operation = nil
         } else {
             let message = result.message ?? "\(result.failedItems.count) file(s) failed."
             lastError = message
+            lastErrorCode = nil
             statusMessage = message
             operation = DeviceOperation(kind: kind, phase: "Partial success", progress: nil, lastError: message)
         }
@@ -484,13 +502,32 @@ final class DeviceBrowserStore: ObservableObject {
     private func applyOperationError(_ error: Error, kind: DeviceOperationKind) {
         if error is CancellationError {
             lastError = nil
+            lastErrorCode = nil
             statusMessage = "Cancelled."
             operation = nil
             return
         }
-        lastError = error.localizedDescription
-        statusMessage = error.localizedDescription
-        operation = DeviceOperation(kind: kind, phase: "Operation failed", progress: nil, lastError: error.localizedDescription)
+        let message: String
+        let code: String?
+        if let helper = error as? MTPHelperError {
+            code = helper.code
+            if let recovery = helper.recoverySuggestion, !recovery.isEmpty {
+                message = "\(helper.message) \(recovery)"
+            } else {
+                message = helper.message
+            }
+        } else {
+            code = nil
+            message = error.localizedDescription
+        }
+        lastError = message
+        lastErrorCode = code
+        statusMessage = message
+        operation = DeviceOperation(kind: kind, phase: "Operation failed", progress: nil, lastError: message)
+
+        if code == "device-busy", let helper = error as? MTPHelperError {
+            statusMessage = helper.errorDescription ?? message
+        }
     }
 
     private func downloadedFiles(in folder: URL, excluding before: Set<URL>) -> [URL] {

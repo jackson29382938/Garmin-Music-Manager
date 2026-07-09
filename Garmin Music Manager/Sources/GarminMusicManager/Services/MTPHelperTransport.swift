@@ -26,7 +26,7 @@ extension MTPHelperTransport {
 /// then one final `{"ok":...}` response line.
 actor PersistentMTPHelperTransport: MTPHelperTransport {
     let helperURL: URL
-    var idleTimeout: TimeInterval = 90
+    private(set) var idleTimeout: TimeInterval = 90
     var defaultTimeoutFloor: TimeInterval = 15
 
     private var process: Process?
@@ -41,6 +41,14 @@ actor PersistentMTPHelperTransport: MTPHelperTransport {
 
     init(helperURL: URL) {
         self.helperURL = helperURL
+    }
+
+    /// Updates keep-alive idle timeout (from Performance settings). Reschedules idle shutdown.
+    func setIdleTimeout(_ seconds: TimeInterval) {
+        idleTimeout = min(600, max(15, seconds))
+        if process != nil {
+            scheduleIdleShutdown()
+        }
     }
 
     func send(

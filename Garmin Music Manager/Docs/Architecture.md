@@ -11,7 +11,13 @@
   - `DeviceOperationsCoordinator` — pure helpers (upload builders, delete policy, paths)
   - `LibraryImportCoordinator` — expand folders/playlists + merge helpers (used by MacLibrarySession)
   - `TransferLogStore` — capped transfer log
-- `Views/` — SwiftUI user interface (device UI reads `DeviceBrowserStore` directly)
+- `Views/` — simplified shell: **Transfer** / **On Watch** / **Settings**
+  - `ContentView` — mode picker, **global** `UserNoticeBanner`, sticky progress while sending, sheets
+  - `TransferHomeView` — connection recovery, import cards, queue, Send, full activity log
+  - `OnWatchView` + `DeviceContentsView` — device file manager (direct add = no playlist)
+  - `SettingsView` — sync policies, destination, MTP install, performance, browser options
+  - `SyncPreviewSheet` / `AppleMusicBrowserView` — modal flows
+  - Shared chrome: `AppTheme`, `StatChip`, `PanelHeader`, `AppLogoMark`, `UserNoticeBanner`
 - `Models/` — devices, tracks, sync jobs, storage info
 - `Services/` — detection, scanning, sync, MTP client/transport, conversion
 - `Stores/` — `DeviceBrowserStore` for mounted-folder and MTP backends (source of truth for device listings)
@@ -46,12 +52,15 @@ rebuild without re-transfer).
 ### Sync flow
 
 ```text
-User selects tracks → Sync Preview (dry-run)
+User selects tracks → beginSend / quickSendSelected
+  → optional Send Preview (always-preview pref, free-space risk, replace/keep-both)
   → MTP: reuse fresh device listing when available (skip forced pre-list)
   → SyncCoordinator copies/uploads (async, cancellable, chunked for MTP)
+  → TransferProgressSnapshot (N of M) → ContentView sticky bar + Transfer activity
   → Helper returns uploaded object IDs; playlist built without full re-list when possible
   → M3UWriter .m3u8 (mounted)  OR  createPlaylist via helper (MTP)
   → DeviceBrowserStore refreshes destination listing at most once for UI
+  → UserNotice (View on Watch / Retry failed)
 ```
 
 `listMusic` does **not** download on-device `.m3u`/`.m3u8` bodies by default
@@ -182,9 +191,13 @@ User Cancel → `Task.cancel` + `MTPHelperClient.cancelInFlightHelper()`:
 
 1. Transport sends **SIGUSR1** to the helper (cooperative)
 2. Helper `MTPCancelState` flips; libmtp progress callback returns `1` → abort current file
-3. Between files, session checks cancel and returns `error.code == "cancelled"`
-4. If still stuck after ~2.5s, transport escalates to SIGTERM/SIGKILL
-5. Client maps `cancelled` → `CancellationError` (no retry)
+3. Between files, upload/download **break** (do not throw) so prior successes return as a normal `DeviceFileOperationResult` with a “Cancelled after N…” message
+4. Mid-file cancel marks that item failed, then breaks with partial successes preserved
+5. Client: pure cancel with zero progress → `CancellationError`; partial success + cancel → returns the result
+6. `SyncCoordinator` credits partial results and stops remaining chunks (`wasCancelled`)
+7. If still stuck after ~2.5s, transport escalates to SIGTERM/SIGKILL
+
+See [DeviceQAChecklist.md](DeviceQAChecklist.md) for manual cancel verification.
 
 ## MTP readiness (brew-free packaged apps)
 
@@ -204,29 +217,79 @@ into `Contents/Frameworks`, signs inside-out (dylibs → helper → app), and ca
 submit to Apple notarization when `NOTARIZE=1` + `CODESIGN_IDENTITY` +
 `NOTARY_PROFILE` are set.
 
+## Performance settings (user-tunable)
+
+
+`PerformanceSettings` (Settings → Performance) exposes transfer knobs with **named presets** and wide ranges. Balanced defaults match historical constants.
+
+### Named presets
+
+| Preset | Intent |
+|--------|--------|
+| **Balanced** | Shipping default |
+| **Fast** | Large batches, long keep-alive, short timeouts, no verify, 128 kbps AAC |
+| **Reliable** | Force re-list, batch 1, more retries, patient timeouts |
+| **Express-friendly** | Short MTP keep-alive so other apps can claim USB |
+| **Small files** | 128 kbps AAC + compress files over 50 MB |
+| **Custom** | Any manual mix |
+
+Selecting a preset replaces all knobs. Editing any control → Custom. Matching is value-based (`matchingPreset(for:)`).
+
+### Knobs
+
+| Knob | Default | Wired to |
+|------|---------|----------|
+| Listing reuse TTL | 120s (`0` = never) | `DeviceBrowserStore.listingReuseTTL` |
+| Force re-list before sync | Off | `SyncSessionController.runMTP` |
+| MTP session keep-alive | 90s | `PersistentMTPHelperTransport.idleTimeout` |
+| Upload batch size | 5 (1…50) | `SyncCoordinator` + `MTPHelperClient` |
+| Auto-detect + USB poll | On, 6s | `DeviceConnectMonitor` |
+| AAC bitrate | 256 (64…320) | `AudioConverter` |
+| MTP retries / backoff | 3 / 0.8s | `MTPRetryPolicy` via `MTPHelperClient.configure` |
+| Timeout scale | 1.0× | Multiplies listing/op timeouts |
+| Compress large files | Off | `SyncCoordinator.prepareTracks` |
+| Include playlist contents | Off | MTP `listMusic(includePlaylistContents:)` |
+| Verify uploads | On | `MTPHelperRequest.verifyUploads` → helper |
+
+`resetAppState` keeps performance prefs. **Restore Balanced defaults** / `resetAllSettings` restore Balanced.
+
+### Library / Conversion / Lifecycle (big ship)
+
+| Group | Examples |
+|-------|----------|
+| **Library** | Restore queue, import selection, skip/auto-deselect duplicates, match mode + duration tolerance, fast import + concurrency, large-file warning MB, storage exceed policy, default sort, remember app mode |
+| **Conversion** | AAC sample rate, keep/clear conversion cache, custom ffmpeg path, treat WAV as convertible |
+| **Lifecycle** | Refresh after send, release helper after send, remote music root, playlist update vs create, auto-retry failed, notify on finish |
+
+Persisted as JSON blobs (`librarySettings.v1`, `conversionSettings.v1`, `lifecycleSettings.v1`) plus existing performance keys.
+
 ## P1 product behaviors
 
-- **Retry failed** — after a partial MTP transfer, failed track IDs are retained; UI/menu can re-select and preview only those tracks.
+- **Retry / continue** — after partial MTP transfer or cancel, failed **and** not-yet-attempted track IDs are retained (`retryTrackIDs`); UI re-selects and sends them.
 - **Playlist update** — native MTP playlists with the same name are updated via `LIBMTP_Update_Playlist` instead of always creating a new one.
-- **USB auto-detect** — `DeviceConnectMonitor` watches volume mount/unmount and polls Garmin USB signatures every ~6s.
+- **USB auto-detect** — `DeviceConnectMonitor` watches volume mount/unmount and polls Garmin USB signatures (interval from Performance settings, default ~6s).
 - **Smarter duplicates** — `TrackMatching` uses name+size, title+artist+size, or title+duration+size.
 - **Queue restore** — Mac track queue paths/selection are saved to `UserDefaults` and restored on launch when files still exist.
 
-## Transfer entry points (single engine)
+## Transfer entry points
 
 | UI action | Entry | Engine |
 |-----------|--------|--------|
-| **Sync Playlist…** | preview → `AppModel.sync()` | `SyncSessionController.run` |
-| **Send Selected to Garmin** | `AppModel.uploadSelectedTracksToDevice()` | same `sync()` / `run` path (no preview) |
-| **Add Files to device** | `DeviceSessionController.uploadFiles` | direct browser upload (not playlist-oriented) |
+| **Send to Watch** | `beginSend()` → preview policy → `sync()` | `SyncSessionController.run` |
+| **Send without Preview** | `quickSendSelected()` / `uploadSelectedTracksToDevice()` | same `sync()` / `run` (storage-gated) |
+| **Add files (no playlist)** On Watch | `uploadFilesToDevice` | direct browser upload — **not** playlist/convert/overwrite |
 
-Do not reintroduce a second MTP plan/execute path for “Send Selected”; it drifts from convert / overwrite / playlist behavior.
+Do not reintroduce a second MTP plan/execute path for playlist send; it drifts from convert / overwrite / playlist behavior.
+
+Completion UX: `TransferCompletionNotice` + global banner; device ops use `handleDeviceOpLog` for success/failure notices.
 
 ## Development hygiene
 
 - Prefer **one writer** on this tree when large refactors are in flight (avoid half-wired untracked modules).
 - New controllers (`SyncSessionController`, `DeviceSessionController`) should be **wired and tracked in git** in the same change set that introduces them—or deleted.
 - Keep packaging version in `VERSION` (semver); tag releases `vX.Y.Z`.
+- Run the [Device QA checklist](DeviceQAChecklist.md) against a real watch after MTP helper changes.
+- Production MTP path uses direct libmtp only (legacy CLI output parsers were removed).
 
 ## Remaining roadmap
 

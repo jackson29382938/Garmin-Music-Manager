@@ -1,8 +1,9 @@
 import Foundation
 
 public enum MTPRetryPolicy {
-    public static let maxAttempts = 3
-    public static let backoffSeconds: TimeInterval = 0.8
+    /// Configurable from app Performance settings; helper process keeps defaults at start.
+    public static var maxAttempts = 3
+    public static var backoffSeconds: TimeInterval = 0.8
 
     public static func isTransientError(_ error: Error) -> Bool {
         let message: String

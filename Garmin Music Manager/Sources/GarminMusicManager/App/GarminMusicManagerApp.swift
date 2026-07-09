@@ -27,7 +27,7 @@ struct GarminMusicManagerApp: App {
                     appModel.chooseM3UPlaylist()
                 }
 
-                Button("Apple Music Library…") {
+                Button("Load Apple Music Library…") {
                     appModel.openAppleMusicBrowser()
                 }
 
@@ -49,18 +49,18 @@ struct GarminMusicManagerApp: App {
 
                 Divider()
 
-                Button("Sync Playlist…") {
-                    appModel.prepareSyncPreview()
+                Button("Send to Watch…") {
+                    appModel.beginSend()
                 }
                 .keyboardShortcut("s", modifiers: [.command, .shift])
                 .disabled(!appModel.canSync)
 
-                Button("Send Selected to Garmin") {
-                    appModel.uploadSelectedTracksToDevice()
+                Button("Send without Preview") {
+                    appModel.quickSendSelected()
                 }
                 .disabled(!appModel.canUploadSelectedTracksToDevice)
 
-                Button("Retry Failed Transfers") {
+                Button(appModel.retryFailedTransfersTitle) {
                     appModel.retryFailedTransfers()
                 }
                 .disabled(!appModel.canRetryFailedTransfers)

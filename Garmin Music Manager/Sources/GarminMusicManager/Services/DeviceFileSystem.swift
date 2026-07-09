@@ -491,8 +491,17 @@ final class MTPDeviceFileSystem: DeviceFileSystem {
         self.helperClient = helperClient
     }
 
+    /// When true, listMusic downloads on-device playlist bodies (expensive).
+    var includePlaylistContents = false
+
     func listMusic() async throws -> DeviceFileSystemSnapshot {
-        try await helperClient.snapshot(request: MTPHelperRequest(operation: .listMusic, browseMode: .musicOnly))
+        try await helperClient.snapshot(
+            request: MTPHelperRequest(
+                operation: .listMusic,
+                browseMode: .musicOnly,
+                includePlaylistContents: includePlaylistContents
+            )
+        )
     }
 
     func listStorageTree() async throws -> DeviceFileSystemSnapshot {
@@ -521,7 +530,11 @@ final class MTPDeviceFileSystem: DeviceFileSystem {
     ) async throws -> DeviceFileOperationResult {
         _ = syncSettings
         return try await helperClient.operationResult(
-            request: MTPHelperRequest(operation: .upload, uploadFiles: files),
+            request: MTPHelperRequest(
+                operation: .upload,
+                uploadFiles: files,
+                verifyUploads: MTPHelperClient.sharedVerifyUploads
+            ),
             onProgress: onProgress
         )
     }
@@ -543,7 +556,8 @@ final class MTPDeviceFileSystem: DeviceFileSystem {
             request: MTPHelperRequest(
                 operation: .createPlaylist,
                 files: tracks,
-                playlistName: name
+                playlistName: name,
+                updateExistingPlaylist: MTPHelperClient.sharedUpdateExistingPlaylist
             )
         )
     }
@@ -552,7 +566,18 @@ final class MTPDeviceFileSystem: DeviceFileSystem {
 final class MTPHelperClient {
     /// Preferred batch size for MTP uploads. Smaller batches improve progress
     /// reporting and limit how much work is lost when a single transfer glitches.
-    static let uploadChunkSize = 5
+    static let defaultUploadChunkSize = 5
+
+    /// App-level defaults applied when creating the shared persistent transport.
+    /// Updated via `configure(...)` from Performance settings.
+    private static var configuredUploadChunkSize = defaultUploadChunkSize
+    private static var configuredIdleTimeout: TimeInterval = 90
+    private static var configuredTimeoutScale: Double = 1.0
+    private static var configuredVerifyUploads = true
+    private static var configuredUpdateExistingPlaylist = true
+
+    /// Instance chunk size used by this client (sync path may also chunk first).
+    private(set) var uploadChunkSize: Int
 
     private let transport: MTPHelperTransport?
 
@@ -560,6 +585,7 @@ final class MTPHelperClient {
     private static var sharedPersistent: (url: URL, transport: PersistentMTPHelperTransport)?
 
     init(helperURL: URL? = nil, preferPersistent: Bool = true) {
+        self.uploadChunkSize = Self.transportQueue.sync { Self.configuredUploadChunkSize }
         let url = helperURL ?? Self.locateHelper()
         if let url {
             if preferPersistent {
@@ -573,7 +599,59 @@ final class MTPHelperClient {
     }
 
     init(transport: MTPHelperTransport) {
+        self.uploadChunkSize = Self.transportQueue.sync { Self.configuredUploadChunkSize }
         self.transport = transport
+    }
+
+    /// Apply performance settings to retries, timeouts, chunking, and the shared helper.
+    static func configure(
+        uploadChunkSize: Int,
+        idleTimeout: TimeInterval,
+        retryAttempts: Int = 3,
+        retryBackoff: TimeInterval = 0.8,
+        timeoutScale: Double = 1.0,
+        verifyUploads: Bool = true,
+        updateExistingPlaylist: Bool = true
+    ) {
+        let chunk = min(50, max(1, uploadChunkSize))
+        let idle = min(600, max(15, idleTimeout))
+        let scale = min(2.5, max(0.5, timeoutScale))
+        let attempts = min(8, max(1, retryAttempts))
+        let backoff = min(5.0, max(0.2, retryBackoff))
+
+        MTPRetryPolicy.maxAttempts = attempts
+        MTPRetryPolicy.backoffSeconds = backoff
+
+        let transport: PersistentMTPHelperTransport? = transportQueue.sync {
+            configuredUploadChunkSize = chunk
+            configuredIdleTimeout = idle
+            configuredTimeoutScale = scale
+            configuredVerifyUploads = verifyUploads
+            configuredUpdateExistingPlaylist = updateExistingPlaylist
+            return sharedPersistent?.transport
+        }
+        if let transport {
+            Task {
+                await transport.setIdleTimeout(idle)
+            }
+        }
+    }
+
+    static var sharedVerifyUploads: Bool {
+        transportQueue.sync { configuredVerifyUploads }
+    }
+
+    static var sharedUpdateExistingPlaylist: Bool {
+        transportQueue.sync { configuredUpdateExistingPlaylist }
+    }
+
+    static var sharedTimeoutScale: Double {
+        transportQueue.sync { configuredTimeoutScale }
+    }
+
+    /// Current configured upload batch size (for callers that chunk before upload).
+    static var sharedUploadChunkSize: Int {
+        transportQueue.sync { configuredUploadChunkSize }
     }
 
     static func shutdownSharedHelper() async {
@@ -600,7 +678,11 @@ final class MTPHelperClient {
                 return existing.transport
             }
             let created = PersistentMTPHelperTransport(helperURL: url)
+            let idle = configuredIdleTimeout
             sharedPersistent = (url, created)
+            Task {
+                await created.setIdleTimeout(idle)
+            }
             return created
         }
     }
@@ -615,14 +697,17 @@ final class MTPHelperClient {
     }
 
     private func listingTimeout(for operation: MTPHelperOperation) -> TimeInterval {
+        let scale = Self.sharedTimeoutScale
+        let base: TimeInterval
         switch operation {
         case .listStorageTree:
-            return 240
+            base = 240
         case .listMusic, .storageInfo, .detect:
-            return 180
+            base = 180
         default:
-            return 90
+            base = 90
         }
+        return base * scale
     }
 
     func operationResult(
@@ -631,7 +716,7 @@ final class MTPHelperClient {
     ) async throws -> DeviceFileOperationResult {
         // Chunk large uploads so one flaky file doesn't burn a multi-hour timeout
         // and so the UI can advance between chunks (caller may also chunk).
-        if request.operation == .upload, request.uploadFiles.count > Self.uploadChunkSize {
+        if request.operation == .upload, request.uploadFiles.count > uploadChunkSize {
             return try await uploadInChunks(request.uploadFiles, onProgress: onProgress)
         }
 
@@ -656,8 +741,9 @@ final class MTPHelperClient {
         var completed = 0
         var failures: [String] = []
         var uploadedObjects: [DeviceUploadedObject] = []
-        let chunks = stride(from: 0, to: files.count, by: Self.uploadChunkSize).map {
-            Array(files[$0..<min($0 + Self.uploadChunkSize, files.count)])
+        let chunkSize = max(1, uploadChunkSize)
+        let chunks = stride(from: 0, to: files.count, by: chunkSize).map {
+            Array(files[$0..<min($0 + chunkSize, files.count)])
         }
         let totalBytes = files.reduce(Int64(0)) { $0 + max(Self.fileSize(atPath: $1.localPath), 0) }
         /// Only bytes from successful (or proportionally successful) chunks.
@@ -667,7 +753,11 @@ final class MTPHelperClient {
             try Task.checkCancellation()
             let chunkBytes = chunk.reduce(Int64(0)) { $0 + max(Self.fileSize(atPath: $1.localPath), 0) }
             let bytesBeforeChunk = completedBytes
-            let request = MTPHelperRequest(operation: .upload, uploadFiles: chunk)
+            let request = MTPHelperRequest(
+                operation: .upload,
+                uploadFiles: chunk,
+                verifyUploads: Self.sharedVerifyUploads
+            )
             let response = try await perform(
                 request: request,
                 timeout: operationTimeout(for: request),
@@ -683,7 +773,7 @@ final class MTPHelperClient {
                     onProgress?(
                         MTPProgressEvent(
                             phase: event.phase,
-                            itemIndex: chunkIndex * Self.uploadChunkSize + event.itemIndex,
+                            itemIndex: chunkIndex * chunkSize + event.itemIndex,
                             itemCount: files.count,
                             itemName: event.itemName,
                             bytesTransferred: event.bytesTransferred,
@@ -743,13 +833,15 @@ final class MTPHelperClient {
     }
 
     func operationTimeout(for request: MTPHelperRequest) -> TimeInterval {
+        let scale = Self.sharedTimeoutScale
+        let raw: TimeInterval
         switch request.operation {
         case .upload:
             let bytes = request.uploadFiles.reduce(Int64(0)) { total, file in
                 total + max(Self.fileSize(atPath: file.localPath), 0)
             }
             // With a warm session, per-item overhead is much lower than cold-start estimates.
-            return Self.scaledTimeout(
+            raw = Self.scaledTimeout(
                 base: 60,
                 itemCount: request.uploadFiles.count,
                 bytes: bytes,
@@ -759,7 +851,7 @@ final class MTPHelperClient {
             )
         case .download:
             let bytes = request.files.reduce(Int64(0)) { $0 + max($1.size, 0) }
-            return Self.scaledTimeout(
+            raw = Self.scaledTimeout(
                 base: 60,
                 itemCount: request.files.count,
                 bytes: bytes,
@@ -768,21 +860,22 @@ final class MTPHelperClient {
                 maximum: 3_600
             )
         case .delete:
-            return min(600, max(45, 30 + TimeInterval(request.files.count * 4)))
+            raw = min(600, max(45, 30 + TimeInterval(request.files.count * 4)))
         case .move:
-            return 600
+            raw = 600
         case .status:
-            return 15
+            raw = 15
         case .detect:
-            return 60
+            raw = 60
         case .listMusic, .storageInfo:
             // Large Garmin libraries (hundreds of tracks) routinely take 30–90s to enumerate.
-            return 180
+            raw = 180
         case .listStorageTree:
-            return 240
+            raw = 240
         case .createPlaylist:
-            return 90
+            raw = 90
         }
+        return raw * scale
     }
 
     static func scaledTimeout(
@@ -883,6 +976,17 @@ final class MTPHelperClient {
         }
         if !response.ok, let error = response.error {
             if error.code == "cancelled" {
+                // Preserve partial work when the helper returns successes alongside cancel.
+                let partial = response.operationResult
+                if let partial, partial.completedCount > 0 || !partial.uploadedFiles.isEmpty {
+                    return MTPHelperResponse(
+                        ok: true,
+                        snapshot: response.snapshot,
+                        operationResult: partial,
+                        dependencyStatus: response.dependencyStatus,
+                        error: nil
+                    )
+                }
                 throw CancellationError()
             }
             throw error

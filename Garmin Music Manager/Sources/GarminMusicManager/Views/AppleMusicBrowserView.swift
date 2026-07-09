@@ -166,7 +166,7 @@ struct AppleMusicBrowserView: View {
 
     private var footer: some View {
         VStack(spacing: 8) {
-            Label("Imports to Mac Library — sync to your watch in Step 4 below.", systemImage: "arrow.down")
+            Label("Adds local, non-DRM tracks to your Transfer queue. Then tap Send to Watch.", systemImage: "arrow.down")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -277,11 +277,6 @@ struct AppleMusicBrowserView: View {
     }
 
     private var actionTitle: String {
-        switch category {
-        case .playlists:
-            return "Prepare Sync"
-        case .albums:
-            return "Import Selection"
-        }
+        "Add to Transfer queue"
     }
 }

@@ -49,13 +49,15 @@ final class DeviceSessionController {
         deviceBrowser: DeviceBrowserStore,
         connectedUSBDevices: [GarminUSBDevice],
         connectedMTPDeviceName: String?,
-        advancedStorageExplorerEnabled: Bool
+        advancedStorageExplorerEnabled: Bool,
+        includePlaylistContents: Bool = false
     ) {
         deviceLibraryCoordinator.configureMTPBrowser(
             deviceBrowser: deviceBrowser,
             connectedUSBDevices: connectedUSBDevices,
             connectedMTPDeviceName: connectedMTPDeviceName,
-            advancedStorageExplorerEnabled: advancedStorageExplorerEnabled
+            advancedStorageExplorerEnabled: advancedStorageExplorerEnabled,
+            includePlaylistContents: includePlaylistContents
         )
     }
 
@@ -455,7 +457,7 @@ final class DeviceSessionController {
         }
     }
 
-    // “Send Selected to Garmin” shares `SyncSessionController.run` with Sync Playlist
-    // (see `AppModel.uploadSelectedTracksToDevice`) so plan / convert / playlist logic
+    // “Quick-send Selected” shares `SyncSessionController.run` with Send to Watch
+    // (see `AppModel.uploadSelectedTracksToDevice` / `quickSendSelected`) so plan / convert / playlist logic
     // cannot drift between the two entry points.
 }

@@ -42,6 +42,20 @@ final class SettingsStoreAppStateTests: XCTestCase {
         XCTAssertEqual(store.syncSettings.organizationPolicy, .byArtist)
         XCTAssertFalse(store.syncSettings.writePlaylist)
     }
+
+    func testAlwaysPreviewBeforeSendDefaultsToTrueAndPersists() {
+        let defaults = isolatedDefaults()
+        defer { defaults.removePersistentDomain(forName: defaultsSuiteName(defaults)) }
+        let store = SettingsStore(defaults: defaults)
+
+        XCTAssertTrue(store.alwaysPreviewBeforeSend)
+
+        store.alwaysPreviewBeforeSend = false
+        XCTAssertFalse(store.alwaysPreviewBeforeSend)
+
+        let store2 = SettingsStore(defaults: defaults)
+        XCTAssertFalse(store2.alwaysPreviewBeforeSend)
+    }
 }
 
 final class GarminFolderTargetTests: XCTestCase {

@@ -239,9 +239,15 @@ final class MTPDirectSession {
         let itemCount = files.count
         let totalBatchBytes = files.reduce(Int64(0)) { $0 + max($1.size, 0) }
         var completedBytes: Int64 = 0
+        /// When true, return partial successes instead of throwing so the app can credit work already done.
+        var cancelledMidBatch = false
 
         for (index, file) in files.enumerated() {
-            try MTPCancelState.throwIfCancelled()
+            // Break (do not throw) so prior successes remain visible to the app.
+            if MTPCancelState.isCancelled {
+                cancelledMidBatch = true
+                break
+            }
 
             guard let objectID = UInt32(file.objectID ?? "") else {
                 failures.append(file.name)
@@ -290,6 +296,12 @@ final class MTPDirectSession {
                     totalBatchBytes: totalBatchBytes
                 )
             } catch {
+                // Mid-file cancel: mark this item incomplete, then stop so remaining items are not failed.
+                if Self.isCancelledError(error) || MTPCancelState.isCancelled {
+                    failures.append(file.name)
+                    cancelledMidBatch = true
+                    break
+                }
                 failures.append(file.name)
             }
         }
@@ -297,11 +309,16 @@ final class MTPDirectSession {
         return DeviceFileOperationResult(
             completedCount: copied,
             failedItems: failures,
-            message: resultMessage(action: "copied", count: copied, failures: failures.count)
+            message: resultMessage(
+                action: "copied",
+                count: copied,
+                failures: failures.count,
+                cancelled: cancelledMidBatch
+            )
         )
     }
 
-    func upload(_ uploadFiles: [DeviceUploadFile]) throws -> DeviceFileOperationResult {
+    func upload(_ uploadFiles: [DeviceUploadFile], verifyUploads: Bool = true) throws -> DeviceFileOperationResult {
         var uploaded = 0
         var failures: [String] = []
         var successfulUploads: [MTPUploadedFile] = []
@@ -311,9 +328,15 @@ final class MTPDirectSession {
             partial + max(fileSize(at: URL(fileURLWithPath: file.localPath)), 0)
         }
         var completedBytes: Int64 = 0
+        /// When true, return partial successes instead of throwing so the app can credit work already done.
+        var cancelledMidBatch = false
 
         for (index, uploadFile) in uploadFiles.enumerated() {
-            try MTPCancelState.throwIfCancelled()
+            // Break (do not throw) so prior successes remain visible to the app.
+            if MTPCancelState.isCancelled {
+                cancelledMidBatch = true
+                break
+            }
 
             let localURL = URL(fileURLWithPath: uploadFile.localPath)
             guard fileManager.fileExists(atPath: localURL.path), fileSize(at: localURL) > 0 else {
@@ -336,6 +359,11 @@ final class MTPDirectSession {
                         try self.deleteSingleObject(objectID: replaceID, name: uploadFile.displayName)
                     }
                 } catch {
+                    if Self.isCancelledError(error) || MTPCancelState.isCancelled {
+                        failures.append(uploadFile.displayName)
+                        cancelledMidBatch = true
+                        break
+                    }
                     failures.append(uploadFile.displayName)
                     continue
                 }
@@ -392,13 +420,23 @@ final class MTPDirectSession {
             } catch {
                 // Folder index may be stale after a mid-batch USB glitch.
                 cachedFolderIndex = folderIndex
+                // Mid-file cancel: mark this item incomplete, then stop so remaining items are not failed.
+                if Self.isCancelledError(error) || MTPCancelState.isCancelled {
+                    failures.append(uploadFile.displayName)
+                    cancelledMidBatch = true
+                    break
+                }
                 failures.append(uploadFile.displayName)
             }
         }
 
         // Prefer per-object metadata checks (cheap). Full re-list is a last resort
         // and was a major source of multi-minute stalls after large batches.
-        let verificationFailures = verifyUploadedFiles(successfulUploads)
+        // Skip verification after cancel so we return promptly with known successes.
+        // Performance setting can disable verification for speed (less safe).
+        let verificationFailures = (cancelledMidBatch || !verifyUploads)
+            ? []
+            : verifyUploadedFiles(successfulUploads)
         let verifiedUploads: [MTPUploadedFile]
         if verificationFailures.isEmpty {
             verifiedUploads = successfulUploads
@@ -425,7 +463,12 @@ final class MTPDirectSession {
         return DeviceFileOperationResult(
             completedCount: uploaded,
             failedItems: failures,
-            message: resultMessage(action: "uploaded", count: uploaded, failures: failures.count),
+            message: resultMessage(
+                action: "uploaded",
+                count: uploaded,
+                failures: failures.count,
+                cancelled: cancelledMidBatch
+            ),
             uploadedFiles: uploadedObjects
         )
     }
@@ -464,7 +507,11 @@ final class MTPDirectSession {
     }
 
     /// Creates a native MTP playlist referencing existing track object IDs.
-    func createPlaylist(name: String?, trackFiles: [DeviceFile]) throws -> DeviceFileOperationResult {
+    func createPlaylist(
+        name: String?,
+        trackFiles: [DeviceFile],
+        updateExisting: Bool = true
+    ) throws -> DeviceFileOperationResult {
         try MTPCancelState.throwIfCancelled()
         let cleanName = (name ?? "Garmin Playlist")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -491,7 +538,11 @@ final class MTPDirectSession {
         }
 
         let action = try MTPRetryPolicy.runWithRetry {
-            try self.createOrUpdatePlaylistOnce(name: playlistName, trackIDs: trackIDs)
+            if updateExisting {
+                return try self.createOrUpdatePlaylistOnce(name: playlistName, trackIDs: trackIDs)
+            }
+            try self.writePlaylist(name: playlistName, trackIDs: trackIDs, existingID: 0, update: false)
+            return PlaylistWriteAction.created
         }
 
         invalidateListingCaches()
@@ -1511,11 +1562,25 @@ final class MTPDirectSession {
         ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init)) ?? 0
     }
 
-    private func resultMessage(action: String, count: Int, failures: Int) -> String {
+    private func resultMessage(action: String, count: Int, failures: Int, cancelled: Bool = false) -> String {
+        if cancelled {
+            if failures == 0 {
+                return "Cancelled after \(count) file(s) \(action)."
+            }
+            return "Cancelled after \(count) file(s) \(action); \(failures) failed."
+        }
         if failures == 0 {
             return "\(count) file(s) \(action)."
         }
         return "\(count) file(s) \(action); \(failures) failed."
+    }
+
+    private static func isCancelledError(_ error: Error) -> Bool {
+        if error is CancellationError { return true }
+        if let helper = error as? MTPHelperError {
+            return helper.code == "cancelled"
+        }
+        return false
     }
 
     private func date(from value: time_t) -> Date? {

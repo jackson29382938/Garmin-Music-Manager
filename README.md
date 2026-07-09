@@ -15,29 +15,28 @@ swift run
 | Path | Purpose |
 |------|---------|
 | [Garmin Music Manager/](Garmin%20Music%20Manager/) | Full SwiftUI app — MTP, Apple Music, device browsing, sync |
+| [Garmin Music Manager/Docs/Architecture.md](Garmin%20Music%20Manager/Docs/Architecture.md) | MTP design, cancel semantics, performance knobs |
+| [Garmin Music Manager/Docs/DeviceQAChecklist.md](Garmin%20Music%20Manager/Docs/DeviceQAChecklist.md) | Manual watch QA matrix (run after MTP changes) |
 | `LICENSE` | MIT license |
 | `.github/workflows/build.yml` | CI: build + test inside the app package |
 
 ## Features
 
-- Garmin volume and USB/MTP device detection
-- Long-lived `GarminMTPHelper --serve` (session reuse, chunked uploads, retries, live progress, mid-file cancel)
-- Apple Music library import (`iTunesLibrary`) for local non-DRM tracks
-- Import local tracks from `.m3u` / `.m3u8` playlists
-- Sync preview, overwrite policies, artist/album folder organization
-- Playlists: `.m3u8` on mounted folders; **native MTP playlists** when enabled
-- Optional ALAC/FLAC → AAC conversion when ffmpeg is installed
-- Device file browser (music + optional advanced storage)
-- Packaged app can bundle libmtp/libusb (no Homebrew required on target Macs)
+- Transfer · On Watch · Settings shell with **Send to Watch**
+- Garmin volume + USB/MTP detection; long-lived helper with progress and mid-file cancel
+- Partial cancel keeps successes; **Retry / continue send** for failed + remaining tracks
+- Apple Music import, M3U playlists, optional ffmpeg conversion
+- Performance presets (batch size, keep-alive, verify uploads, …)
+- Packaged app can bundle libmtp/libusb
 
-See [Garmin Music Manager/README.md](Garmin%20Music%20Manager/README.md) for usage, settings, packaging/notarization, roadmap, and the release checklist.
+See [Garmin Music Manager/README.md](Garmin%20Music%20Manager/README.md) for usage, packaging, and release checklist.
 
 ## Requirements
 
 - macOS 14+
 - Xcode 15+ / Swift 5.9+
-- For source builds of the MTP helper: libmtp (e.g. `brew install libmtp`)
+- Source builds: libmtp via Homebrew
 
 ## Versioning
 
-The packaged app version comes from `Garmin Music Manager/VERSION` (semver). Tag releases as `v0.1.0` so `git describe` matches. Untagged builds fall back to that file, then a git hash.
+Packaged version comes from `Garmin Music Manager/VERSION`. Tag releases as `v0.1.0`.

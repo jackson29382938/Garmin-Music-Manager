@@ -17,6 +17,12 @@ final class AppModel: ObservableObject {
     @Published var isScanning = false
     @Published var isManagingDeviceFiles = false
     @Published var syncProgress: Double = 0
+    /// Structured send progress (N of M, track name). Nil when idle.
+    @Published var transferProgress: TransferProgressSnapshot?
+    /// ContentView flips to On Watch when this becomes true.
+    @Published var shouldFocusOnWatch = false
+    /// ContentView switches to Transfer when true (e.g. after Apple Music import).
+    @Published var shouldFocusTransfer = false
     @Published var playlistName: String {
         didSet { persistSettingsIfReady() }
     }
@@ -48,6 +54,41 @@ final class AppModel: ObservableObject {
     @Published var destructiveConfirmationMode: DestructiveConfirmationMode {
         didSet { persistSettingsIfReady() }
     }
+    /// When true (default), Send opens a preview sheet first.
+    @Published var alwaysPreviewBeforeSend: Bool {
+        didSet { persistSettingsIfReady() }
+    }
+    /// Transfer/session performance knobs (listing reuse, MTP keep-alive, batch size, etc.).
+    @Published var performanceSettings: PerformanceSettings {
+        didSet {
+            applyPerformanceSettings()
+            persistSettingsIfReady()
+        }
+    }
+    /// Mac library / import / matching preferences.
+    @Published var librarySettings: LibrarySettings {
+        didSet {
+            applyLibrarySettings()
+            persistSettingsIfReady()
+        }
+    }
+    /// Conversion quality and cache.
+    @Published var conversionSettings: ConversionSettings {
+        didSet {
+            applyConversionSettings()
+            persistSettingsIfReady()
+        }
+    }
+    /// Post-send / device lifecycle preferences.
+    @Published var lifecycleSettings: LifecycleSettings {
+        didSet {
+            applyLifecycleSettings()
+            persistSettingsIfReady()
+        }
+    }
+
+    /// User-facing banner (not the technical transfer log).
+    @Published var userNotice: UserNotice?
 
     /// Suppresses auto-persist while `init` / reset assign multiple properties.
     private var isPersistingSettings = false
@@ -74,6 +115,8 @@ final class AppModel: ObservableObject {
     private var transferLogCancellable: AnyCancellable?
     private var tracksPersistCancellable: AnyCancellable?
     private var connectMonitor: DeviceConnectMonitor?
+    /// Avoids spamming the transfer log on per-byte progress; log once per item.
+    private var lastLoggedProgressItemIndex: Int?
 
     /// True when the device browser has loaded any MTP listing (files or collections).
     var isMTPLibraryLoaded: Bool {
@@ -97,9 +140,16 @@ final class AppModel: ObservableObject {
         self.destinationWarning = storedDestination.flatMap { Self.customDestinationWarning(for: $0) }
         self.advancedStorageExplorerEnabled = settingsStore.advancedStorageExplorerEnabled
         self.destructiveConfirmationMode = settingsStore.destructiveConfirmationMode
+        self.alwaysPreviewBeforeSend = settingsStore.alwaysPreviewBeforeSend
+        self.performanceSettings = settingsStore.performanceSettings
+        self.librarySettings = settingsStore.librarySettings
+        self.conversionSettings = settingsStore.conversionSettings
+        self.lifecycleSettings = settingsStore.lifecycleSettings
         self.deviceBrowser.browseMode = settingsStore.advancedStorageExplorerEnabled
             ? settingsStore.lastDeviceBrowseMode
             : .musicOnly
+        self.deviceBrowser.listingReuseTTL = performanceSettings.listingReuseSeconds
+        self.deviceBrowser.sortOrder = librarySettings.defaultDeviceSort
         self.deviceBrowserCancellable = deviceBrowser.objectWillChange.sink { [weak self] _ in
             self?.objectWillChange.send()
         }
@@ -116,6 +166,11 @@ final class AppModel: ObservableObject {
             .sink { [weak self] tracks in
                 self?.macLibrarySession.saveQueue(tracks)
             }
+        // Apply MTP helper knobs without re-entering didSet side effects.
+        applyMTPClientConfiguration(performanceSettings)
+        applyLibrarySettings(initial: true)
+        applyConversionSettings(initial: true)
+        applyLifecycleSettings(initial: true)
         if autoRefresh {
             if let destination = destinationOverride {
                 refreshDeviceContents(at: destination)
@@ -125,7 +180,9 @@ final class AppModel: ObservableObject {
             let monitor = DeviceConnectMonitor { [weak self] in
                 self?.refreshDevices()
             }
-            monitor.start()
+            if performanceSettings.autoDetectDevices {
+                monitor.start(pollInterval: performanceSettings.usbPollIntervalSeconds, pollUSB: true)
+            }
             self.connectMonitor = monitor
         }
     }
@@ -136,8 +193,16 @@ final class AppModel: ObservableObject {
             && tracks.contains { lastFailedTrackIDs.contains($0.id) && $0.compatibility.canCopy }
     }
 
+    /// Label for the retry action (failed only vs continue after cancel).
+    var retryFailedTransfersTitle: String {
+        "Retry / continue send"
+    }
+
     var syncableTracks: [AudioTrack] {
-        macLibrarySession.syncableTracks(from: tracks)
+        macLibrarySession.syncableTracks(
+            from: tracks,
+            skipDuplicates: librarySettings.skipDuplicatesWhenSending
+        )
     }
 
     var blockedTracks: [AudioTrack] {
@@ -252,57 +317,191 @@ final class AppModel: ObservableObject {
 
     var uploadDisabledReason: String? {
         if isSyncing || isManagingDeviceFiles { return "A transfer is already in progress." }
-        if syncableTracks.isEmpty { return "Select compatible tracks in the Mac Library first." }
+        if syncableTracks.isEmpty { return "Select compatible tracks in the Transfer queue first." }
         if !deviceBrowser.isConfigured && activeDestination == nil && !canAttemptMTP {
             return "Connect a Garmin or choose a destination folder."
         }
         if deviceBrowser.browseMode != .musicOnly {
-            return "Switch the Garmin browser back to Music."
+            return "Switch the On Watch browser back to Music."
+        }
+        if exceedsAvailableStorage {
+            return "Selected tracks exceed free space on the watch."
         }
         return nil
     }
 
-    var workflowSteps: [WorkflowStep] {
-        let connected = destinationIsReady || !connectedUSBDevices.isEmpty || !devices.isEmpty
-        let imported = !tracks.isEmpty
-        let selected = !syncableTracks.isEmpty
-        let syncing = isSyncing
+    /// Blocks send when free space is known and selection is too large.
+    @discardableResult
+    func assertStorageAllowsSend() -> Bool {
+        switch librarySettings.storageExceedPolicy {
+        case .ignore:
+            return true
+        case .warnOnly:
+            if exceedsAvailableStorage {
+                presentNotice(
+                    .warning,
+                    title: "Selection may not fit",
+                    message: "Selected tracks may exceed free space on the watch. You can still send."
+                )
+            }
+            return true
+        case .blockSend:
+            if exceedsAvailableStorage {
+                presentNotice(
+                    .error,
+                    title: "Not enough free space",
+                    message: "Selected tracks exceed free space on the watch. Deselect some tracks or free space, then try again."
+                )
+                return false
+            }
+            return true
+        }
+    }
 
-        return [
-            WorkflowStep(
-                id: 1,
-                title: "Connect",
-                systemImage: "cable.connector",
-                hint: "Connect your Garmin via USB and click Refresh in the sidebar.",
-                isComplete: connected,
-                isActive: !connected
-            ),
-            WorkflowStep(
-                id: 2,
-                title: "Import",
-                systemImage: "square.and.arrow.down",
-                hint: "Add music from your Mac using Add Files, Add Folder, or drag-and-drop.",
-                isComplete: imported,
-                isActive: connected && !imported
-            ),
-            WorkflowStep(
-                id: 3,
-                title: "Select",
-                systemImage: "checkmark.circle",
-                hint: "Check the tracks you want on your watch. Use Select Ready for compatible files.",
-                isComplete: selected,
-                isActive: imported && !selected
-            ),
-            WorkflowStep(
-                id: 4,
-                title: "Sync",
-                systemImage: "arrow.down.circle",
-                hint: "Name your playlist and click Sync Playlist to Garmin.",
-                isComplete: false,
-                isActive: selected,
-                isInProgress: syncing
-            )
-        ]
+    /// Short help when the queue has blocked tracks.
+    var blockedTracksHelp: String? {
+        guard !blockedTracks.isEmpty else { return nil }
+        let needsConvert = blockedTracks.contains {
+            MusicCompatibilityEvaluator.needsConversion(ext: $0.fileExtension, codecHint: $0.codecHint)
+        }
+        if needsConvert && !syncSettings.convertIncompatibleFormats {
+            return "Some tracks need conversion. Enable Convert ALAC/FLAC in Advanced (requires ffmpeg)."
+        }
+        if needsConvert && syncSettings.convertIncompatibleFormats && !isFFmpegAvailable {
+            return "Conversion is on but ffmpeg is not installed (brew install ffmpeg)."
+        }
+        if needsConvert {
+            return "Some tracks still can’t be sent after conversion. Check the list for details."
+        }
+        return "DRM or cloud-only tracks can’t be sent. Only local, non-DRM files work."
+    }
+
+    /// Cached ffmpeg probe (refreshed on demand).
+    private var cachedFFmpegAvailable: Bool?
+    private var lastDeviceBusyNoticeAt = Date.distantPast
+
+    /// Whether ffmpeg is on PATH (for optional ALAC/FLAC conversion).
+    var isFFmpegAvailable: Bool {
+        if let cachedFFmpegAvailable { return cachedFFmpegAvailable }
+        let available = AudioConverter().isAvailable
+        cachedFFmpegAvailable = available
+        return available
+    }
+
+    /// True when convert is enabled but ffmpeg is missing.
+    var needsFFmpegInstall: Bool {
+        syncSettings.convertIncompatibleFormats && !isFFmpegAvailable
+    }
+
+    /// Re-probe ffmpeg (Settings / Transfer appear).
+    func refreshFFmpegAvailability() {
+        cachedFFmpegAvailable = AudioConverter().isAvailable
+    }
+
+    /// Surfaces a user-facing notice when convert is turned on without ffmpeg.
+    func warnIfConversionNeedsFFmpeg() {
+        refreshFFmpegAvailability()
+        guard needsFFmpegInstall else { return }
+        presentNotice(
+            .warning,
+            title: "ffmpeg not found",
+            message: "Convert ALAC/FLAC is on, but ffmpeg is not installed. Install it with Homebrew: brew install ffmpeg.",
+            alsoLog: true
+        )
+    }
+
+    /// Present a banner when a device-busy MTP error is detected.
+    func presentDeviceBusyNoticeIfNeeded(from message: String?) {
+        if deviceBrowser.isLastErrorDeviceBusy {
+            presentDeviceBusyNoticeDebounced()
+            return
+        }
+        guard let message, !message.isEmpty else { return }
+        let lower = message.lowercased()
+        guard lower.contains("device-busy")
+            || lower.contains("device is busy")
+            || lower.contains("another app is using the garmin")
+            || lower.contains("resource busy")
+            || lower.contains("claim_interface") else { return }
+        presentDeviceBusyNoticeDebounced()
+    }
+
+    private func presentDeviceBusyNoticeDebounced() {
+        // Avoid stacking the same banner from browse log + lastError + sync failure.
+        if userNotice?.code == .deviceBusy { return }
+        let now = Date()
+        guard now.timeIntervalSince(lastDeviceBusyNoticeAt) > 2.5 else { return }
+        lastDeviceBusyNoticeAt = now
+        presentNotice(TransferCompletionNotice.deviceBusy(), alsoLog: false)
+    }
+
+    func dismissNotice() {
+        userNotice = nil
+    }
+
+    func presentNotice(_ notice: UserNotice, alsoLog: Bool = true) {
+        userNotice = notice
+        if alsoLog {
+            if let message = notice.message, !message.isEmpty {
+                appendLog("\(notice.title) — \(message)")
+            } else {
+                appendLog(notice.title)
+            }
+        }
+    }
+
+    func presentNotice(
+        _ kind: UserNoticeKind,
+        title: String,
+        message: String? = nil,
+        action: UserNoticeAction? = nil,
+        code: UserNoticeCode? = nil,
+        alsoLog: Bool = true
+    ) {
+        presentNotice(
+            UserNotice(kind: kind, title: title, message: message, action: action, code: code),
+            alsoLog: alsoLog
+        )
+    }
+
+    /// Runs the banner CTA (View on Watch / Retry failed), then clears the notice.
+    func performNoticeAction() {
+        guard let action = userNotice?.action else {
+            dismissNotice()
+            return
+        }
+        dismissNotice()
+        switch action {
+        case .showOnWatch:
+            shouldFocusOnWatch = true
+        case .retryFailed:
+            retryFailedTransfers()
+        }
+    }
+
+    func consumeFocusOnWatch() {
+        shouldFocusOnWatch = false
+    }
+
+    func consumeFocusTransfer() {
+        shouldFocusTransfer = false
+    }
+
+    /// Log + user-facing notice for On Watch file operations (delete/upload/move/copy).
+    private func handleDeviceOpLog(_ message: String) {
+        appendLog(message)
+        presentDeviceBusyNoticeIfNeeded(from: message)
+        let lower = message.lowercased()
+        if lower.contains("failed") || lower.hasPrefix("could not") {
+            presentNotice(.error, title: "On Watch operation failed", message: message, alsoLog: false)
+            return
+        }
+        if lower.contains("deleted")
+            || lower.contains("uploaded")
+            || lower.contains("copied")
+            || lower.contains("moved") {
+            presentNotice(.success, title: "On Watch updated", message: message, alsoLog: false)
+        }
     }
 
     var selectedDeviceFiles: [DeviceFile] {
@@ -409,7 +608,6 @@ final class AppModel: ObservableObject {
     }
 
     /// Import local tracks referenced by an `.m3u` / `.m3u8` playlist file.
-    /// Import local tracks referenced by an `.m3u` / `.m3u8` playlist file.
     func chooseM3UPlaylist() {
         guard let url = macLibrarySession.chooseM3UPlaylistURL() else { return }
         Task { await importM3UPlaylist(from: url) }
@@ -488,6 +686,7 @@ final class AppModel: ObservableObject {
         let result = await macLibrarySession.addFiles(
             urls,
             into: tracks,
+            library: librarySettings,
             setScanning: { [weak self] value in self?.isScanning = value }
         )
         tracks = result.tracks
@@ -498,8 +697,15 @@ final class AppModel: ObservableObject {
                 message += " \(syncableTracks.count) selected and ready."
             }
             appendLog(message)
+            presentNotice(
+                .success,
+                title: "Added \(result.addedCount) track(s)",
+                message: "Review the queue, then tap Send to Watch.",
+                alsoLog: false
+            )
         } else if let message = result.message {
             appendLog(message)
+            presentNotice(.warning, title: "Nothing added", message: message, alsoLog: false)
         }
     }
 
@@ -509,6 +715,27 @@ final class AppModel: ObservableObject {
 
     func removeTracks(at offsets: IndexSet) {
         tracks = macLibrarySession.removeTracks(at: offsets, filtered: filteredTracks, from: tracks)
+    }
+
+    func removeTracks(ids: Set<UUID>) {
+        guard !ids.isEmpty else { return }
+        tracks = macLibrarySession.removeTracks(ids: ids, from: tracks)
+        lastFailedTrackIDs.subtract(ids)
+    }
+
+    /// Ensures the right-clicked track is part of the isSelected set (Finder-style).
+    func prepareMacSelectionForContextMenu(trackID: UUID) {
+        guard let index = tracks.firstIndex(where: { $0.id == trackID }) else { return }
+        if tracks[index].isSelected { return }
+        for i in tracks.indices {
+            tracks[i].isSelected = tracks[i].id == trackID && tracks[i].compatibility.canCopy
+        }
+    }
+
+    func revealTracksInFinder(ids: Set<UUID>) {
+        let urls = tracks.filter { ids.contains($0.id) }.map(\.url)
+        guard !urls.isEmpty else { return }
+        NSWorkspace.shared.activateFileViewerSelecting(urls)
     }
 
     func clearTracks() {
@@ -521,6 +748,7 @@ final class AppModel: ObservableObject {
     private func restoreLibraryQueueIfNeeded() async {
         guard tracks.isEmpty else { return }
         guard let result = await macLibrarySession.restoreQueue(
+            library: librarySettings,
             setScanning: { [weak self] value in self?.isScanning = value }
         ) else { return }
         tracks = result.tracks
@@ -565,42 +793,118 @@ final class AppModel: ObservableObject {
             playlistName: playlistName,
             syncSettings: syncSettings
         )
+        if librarySettings.autoDeselectDuplicates {
+            tracks = macLibrarySession.applyAutoDeselectDuplicates(tracks, enabled: true)
+        }
     }
 
+    /// Primary entry for Send to Watch — preview when required, otherwise send immediately.
+    func beginSend() {
+        startSend(forcePreview: nil)
+    }
+
+    /// Menu quick-send: still respects storage/replace preview rules, but skips
+    /// the “always preview” preference so power users get one-click when safe.
+    func quickSendSelected() {
+        startSend(forcePreview: false, respectAlwaysPreviewPreference: false)
+    }
+
+    /// Builds and shows the send preview sheet (always).
     func prepareSyncPreview() {
-        guard !syncableTracks.isEmpty else {
-            appendLog("Nothing to sync. Add compatible selected files first.")
+        startSend(forcePreview: true)
+    }
+
+    /// Shared send entry for Transfer button, menu, and quick-send.
+    /// - Parameters:
+    ///   - forcePreview: `true` always sheet; `false` never from preference; `nil` use policy.
+    ///   - respectAlwaysPreviewPreference: when false, “Always preview” is ignored (quick-send).
+    private func startSend(forcePreview: Bool?, respectAlwaysPreviewPreference: Bool = true) {
+        guard !isSyncing, !isManagingDeviceFiles, !isBrowsingDevice else {
+            presentNotice(.info, title: "Busy", message: "Wait for the current transfer or device operation to finish.")
             return
         }
+        guard !syncableTracks.isEmpty else {
+            if tracks.isEmpty {
+                presentNotice(
+                    .warning,
+                    title: "Add music first",
+                    message: "Use Apple Music or Files on Transfer, or drag audio onto the page.",
+                    code: .nothingToSend
+                )
+            } else {
+                presentNotice(
+                    .warning,
+                    title: "No compatible tracks selected",
+                    message: blockedTracksHelp ?? "Open Edit selection and choose ready tracks.",
+                    code: .nothingToSend
+                )
+            }
+            return
+        }
+        guard destinationIsReady else {
+            presentNotice(
+                .warning,
+                title: "Connect your Garmin",
+                message: connectedUSBDevices.isEmpty
+                    ? "Plug in with a data USB cable, unlock the watch, then Refresh."
+                    : mtpDependencyStatus.message
+            )
+            return
+        }
+
         do {
-            syncPreview = try syncSession.buildPreview(
+            let preview = try syncSession.buildPreview(
                 tracks: syncableTracks,
                 playlistName: playlistName,
                 settings: syncSettings,
+                performance: performanceSettings,
                 activeDestination: activeDestination,
                 deviceFiles: deviceBrowser.files,
                 mtpReady: mtpDependencyStatus.isReady
             )
-            showSyncPreview = true
+            syncPreview = preview
+
+            // forcePreview true → always sheet; false/nil → policy (quick-send ignores “always preview”).
+            let alwaysFromSettings = respectAlwaysPreviewPreference && alwaysPreviewBeforeSend
+            let showPreview = (forcePreview == true) || SendPreviewPolicy.shouldShowPreview(
+                alwaysPreview: forcePreview == true ? true : alwaysFromSettings,
+                exceedsAvailableStorage: exceedsAvailableStorage,
+                preview: preview
+            )
+
+            if showPreview {
+                showSyncPreview = true
+            } else {
+                guard assertStorageAllowsSend() else { return }
+                Task { await sync() }
+            }
         } catch let error as SyncSessionError {
             switch error {
             case .mtpNotReady:
-                appendLog(mtpDependencyStatus.message)
+                presentNotice(
+                    .error,
+                    title: "MTP not ready",
+                    message: mtpDependencyStatus.message,
+                    code: .mtpNotReady
+                )
             }
         } catch {
-            appendLog("Preview failed: \(error.localizedDescription)")
+            presentNotice(.error, title: "Could not prepare send", message: error.localizedDescription)
         }
     }
 
     func confirmSync() {
+        guard assertStorageAllowsSend() else { return }
         showSyncPreview = false
         Task { await sync() }
     }
 
     func cancelSync() {
-        isSyncing = false
+        // Notice comes from session onCancelled / MTP wasCancelled completion.
         syncSession.cancel()
         appendLog("Sync cancelled.")
+        isSyncing = false
+        transferProgress = nil
     }
 
     /// Cancels the in-flight device browse or file operation (refresh, upload,
@@ -613,63 +917,108 @@ final class AppModel: ObservableObject {
 
     func sync() async {
         guard !syncableTracks.isEmpty else {
-            appendLog("Nothing to sync.")
+            presentNotice(.warning, title: "Nothing to send", message: "Add compatible selected files first.")
             return
         }
+        guard assertStorageAllowsSend() else { return }
 
         isSyncing = true
         syncProgress = 0
+        transferProgress = .phase(0, "Starting…")
+        lastLoggedProgressItemIndex = nil
+        dismissNotice()
         persistSettingsIfReady(force: true)
 
         defer {
             isSyncing = false
             syncProgress = 1
+            transferProgress = nil
+            lastLoggedProgressItemIndex = nil
         }
 
         await syncSession.run(
             tracks: syncableTracks,
             playlistName: playlistName,
             settings: syncSettings,
+            performance: performanceSettings,
+            conversion: conversionSettings,
+            refreshAfterSend: lifecycleSettings.refreshDeviceAfterSend,
             activeDestination: activeDestination,
             mtpReady: mtpDependencyStatus.isReady,
             mtpNotReadyMessage: mtpDependencyStatus.message,
             deviceBrowser: deviceBrowser,
             configureMTP: { [weak self] in self?.configureMTPBrowser() },
-            onProgress: { [weak self] progress, message in
-                self?.syncProgress = progress
-                if let message { self?.appendLog(message) }
+            onProgress: { [weak self] snapshot in
+                self?.applyTransferProgressSnapshot(snapshot)
             },
             onLog: { [weak self] message in
                 self?.appendLog(message)
+                self?.presentDeviceBusyNoticeIfNeeded(from: message)
             },
-            onMountedComplete: { [weak self] destination in
-                self?.lastFailedTrackIDs = []
-                self?.refreshDeviceContents(at: destination)
+            onMountedComplete: { [weak self] result in
+                guard let self else { return }
+                self.lastFailedTrackIDs = []
+                self.refreshDeviceContents(at: result.targetFolder)
+                self.presentNotice(TransferCompletionNotice.forMounted(result), alsoLog: false)
             },
             onMTPComplete: { [weak self] result in
-                self?.lastFailedTrackIDs = Set(result.failedTrackIDs)
-                self?.applyPostMTPTransferUI(forceLibraryRefresh: false)
+                guard let self else { return }
+                // Include remaining (not attempted) so Cancel → Retry continues the rest.
+                self.lastFailedTrackIDs = Set(result.retryTrackIDs)
+                self.applyPostMTPTransferUI(forceLibraryRefresh: false)
+                self.presentMTPCompletionNotice(result)
+            },
+            onCancelled: { [weak self] in
+                // Only used when the task throws CancellationError before MTP result.
+                // If userNotice already set by MTP completion, leave it.
+                guard let self, self.userNotice == nil else { return }
+                self.presentNotice(TransferCompletionNotice.cancelled(), alsoLog: false)
+            },
+            onFailed: { [weak self] error in
+                guard let self else { return }
+                self.presentDeviceBusyNoticeIfNeeded(from: error.localizedDescription)
+                if self.userNotice?.code == .deviceBusy {
+                    return
+                }
+                self.presentNotice(TransferCompletionNotice.failed(error.localizedDescription), alsoLog: false)
             }
         )
     }
 
-    /// Re-selects only tracks that failed the last MTP transfer and starts a new sync.
-    /// Re-selects only tracks that failed the last MTP transfer and starts a new sync.
+    /// Updates live progress UI and logs once per file start (not per-byte).
+    private func applyTransferProgressSnapshot(_ snapshot: TransferProgressSnapshot) {
+        syncProgress = snapshot.fraction
+        transferProgress = snapshot
+        guard let itemIndex = snapshot.itemIndex else { return }
+        if lastLoggedProgressItemIndex == itemIndex { return }
+        lastLoggedProgressItemIndex = itemIndex
+        if let label = snapshot.itemLabel {
+            appendLog("Uploading \(label)")
+        } else if let message = snapshot.message, !message.isEmpty {
+            appendLog(message)
+        }
+    }
+
+    /// Re-selects only tracks that failed the last MTP transfer and starts a new send.
     func retryFailedTransfers() {
         guard canRetryFailedTransfers else {
-            appendLog("Nothing to retry.")
+            presentNotice(.info, title: "Nothing to retry", message: "There are no failed tracks left in the queue.")
             return
         }
         tracks = macLibrarySession.selectOnly(ids: lastFailedTrackIDs, in: tracks)
         let count = tracks.filter { $0.isSelected }.count
         appendLog("Retrying \(count) failed track(s)…")
-        prepareSyncPreview()
+        if alwaysPreviewBeforeSend {
+            prepareSyncPreview()
+        } else {
+            Task { await sync() }
+        }
     }
 
     func installMTPDependencies() {
         guard !isInstallingMTPDependencies else { return }
         isInstallingMTPDependencies = true
-        appendLog("Installing portable MTP support (Homebrew/libmtp if needed)…")
+        presentNotice(.info, title: "Installing MTP support…", message: "Homebrew/libmtp may be installed if needed.")
         Task {
             defer { isInstallingMTPDependencies = false }
             do {
@@ -682,11 +1031,22 @@ final class AppModel: ObservableObject {
                 }
                 mtpDependencyStatus = mtpDependencyManager.dependencyStatus()
                 appendLog(mtpDependencyStatus.message)
+                if mtpDependencyStatus.isReady {
+                    presentNotice(.success, title: "MTP ready", message: mtpDependencyStatus.message, alsoLog: false)
+                } else {
+                    presentNotice(.warning, title: "MTP still not ready", message: mtpDependencyStatus.message, alsoLog: false)
+                }
                 refreshDevices()
             } catch {
-                appendLog("MTP dependency install failed: \(error.localizedDescription)")
+                presentNotice(.error, title: "MTP install failed", message: error.localizedDescription)
             }
         }
+    }
+
+    private func presentMTPCompletionNotice(_ result: MTPSyncResult) {
+        let canRetry = !result.retryTrackIDs.isEmpty
+            && tracks.contains { result.retryTrackIDs.contains($0.id) && $0.compatibility.canCopy }
+        presentNotice(TransferCompletionNotice.forMTP(result, canRetry: canRetry), alsoLog: false)
     }
 
     func deleteSelectedDeviceFiles() {
@@ -694,7 +1054,7 @@ final class AppModel: ObservableObject {
             deviceBrowser: deviceBrowser,
             setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
             onFinished: { [weak self] in self?.updateDuplicateFlags() },
-            log: { [weak self] message in self?.appendLog(message) }
+            log: { [weak self] message in self?.handleDeviceOpLog(message) }
         )
     }
 
@@ -716,7 +1076,7 @@ final class AppModel: ObservableObject {
         deviceSession.copySelectedToMac(
             deviceBrowser: deviceBrowser,
             setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
-            log: { [weak self] message in self?.appendLog(message) }
+            log: { [weak self] message in self?.handleDeviceOpLog(message) }
         )
     }
 
@@ -741,7 +1101,7 @@ final class AppModel: ObservableObject {
             setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
             setShowMTPMoveDeleteConfirmation: { [weak self] value in self?.showMTPMoveDeleteConfirmation = value },
             onFinished: { [weak self] in self?.updateDuplicateFlags() },
-            log: { [weak self] message in self?.appendLog(message) }
+            log: { [weak self] message in self?.handleDeviceOpLog(message) }
         )
     }
 
@@ -751,7 +1111,7 @@ final class AppModel: ObservableObject {
             setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
             setShowConfirmation: { [weak self] value in self?.showMTPMoveDeleteConfirmation = value },
             onFinished: { [weak self] in self?.updateDuplicateFlags() },
-            log: { [weak self] message in self?.appendLog(message) }
+            log: { [weak self] message in self?.handleDeviceOpLog(message) }
         )
     }
 
@@ -795,7 +1155,11 @@ final class AppModel: ObservableObject {
             setBrowsing: { [weak self] value in self?.isBrowsingDevice = value },
             setConnectedMTPDeviceName: { [weak self] value in self?.connectedMTPDeviceName = value },
             onDuplicates: { [weak self] in self?.updateDuplicateFlags() },
-            log: { [weak self] message in self?.appendLog(message) }
+            log: { [weak self] message in
+                self?.appendLog(message)
+                self?.presentDeviceBusyNoticeIfNeeded(from: message)
+                self?.presentDeviceBusyNoticeIfNeeded(from: self?.deviceBrowser.lastError)
+            }
         )
     }
 
@@ -831,7 +1195,7 @@ final class AppModel: ObservableObject {
             deviceBrowser: deviceBrowser,
             setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
             onFinished: { [weak self] in self?.updateDuplicateFlags() },
-            log: { [weak self] message in self?.appendLog(message) }
+            log: { [weak self] message in self?.handleDeviceOpLog(message) }
         )
     }
 
@@ -842,26 +1206,27 @@ final class AppModel: ObservableObject {
             deviceBrowser: deviceBrowser,
             setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
             onFinished: { [weak self] in self?.updateDuplicateFlags() },
-            log: { [weak self] message in self?.appendLog(message) }
+            log: { [weak self] message in self?.handleDeviceOpLog(message) }
         )
     }
 
-    /// Sends selected Mac tracks using the **same** engine as Sync Playlist
-    /// (`sync()` → `SyncSessionController.run`). Skips the preview sheet only.
+    /// Menu quick-send: same engine as Send to Watch; skips “always preview” preference
+    /// but still shows a preview when free space is low or files would be replaced.
     func uploadSelectedTracksToDevice() {
-        guard !syncableTracks.isEmpty else {
-            appendLog("No selected compatible Mac tracks to send.")
-            return
-        }
-        guard canUploadSelectedTracksToDevice else {
+        guard canUploadSelectedTracksToDevice || canSync else {
             if let reason = uploadDisabledReason {
-                appendLog(reason)
+                presentNotice(.warning, title: "Can’t send yet", message: reason)
+            } else {
+                presentNotice(.warning, title: "Nothing to send", message: "Select compatible tracks in the Transfer queue first.")
             }
             return
         }
-        guard prepareDeviceBrowserForUpload() else { return }
-        appendLog("Sending selected tracks (same path as Sync Playlist)…")
-        Task { await sync() }
+        guard prepareDeviceBrowserForUpload() else {
+            presentNotice(.warning, title: "Destination not ready", message: "Connect a Garmin or choose a music folder.")
+            return
+        }
+        appendLog("Quick-send selected tracks…")
+        quickSendSelected()
     }
 
     func openAppleMusicBrowser() {
@@ -895,11 +1260,29 @@ final class AppModel: ObservableObject {
         for line in plan.logMessages {
             appendLog(line)
         }
-        guard !plan.urls.isEmpty else { return }
+        guard !plan.urls.isEmpty else {
+            presentNotice(
+                .warning,
+                title: "Nothing to import",
+                message: plan.skipped > 0
+                    ? "No local, non-DRM tracks (\(plan.skipped) cloud/DRM skipped)."
+                    : "No local, non-DRM tracks in this selection."
+            )
+            return
+        }
         if plan.closeBrowser {
             showAppleMusicBrowser = false
         }
-        Task { await addFiles(plan.urls) }
+        Task {
+            await addFiles(plan.urls)
+            shouldFocusTransfer = true
+            var message = "Added \(plan.urls.count) track(s) to the Transfer queue."
+            if plan.skipped > 0 {
+                message += " Skipped \(plan.skipped) cloud-only/DRM."
+            }
+            message += " Tap Send to Watch when ready."
+            presentNotice(.success, title: "Added to queue", message: message, alsoLog: false)
+        }
     }
 
     func prepareAppleMusicPlaylistForSync(_ playlistID: String) {
@@ -911,7 +1294,16 @@ final class AppModel: ObservableObject {
         for line in plan.logMessages {
             appendLog(line)
         }
-        guard !plan.urls.isEmpty else { return }
+        guard !plan.urls.isEmpty else {
+            presentNotice(
+                .warning,
+                title: "Nothing to import",
+                message: plan.skipped > 0
+                    ? "No local files in this playlist (\(plan.skipped) cloud/DRM skipped)."
+                    : "No local, non-DRM tracks in this playlist."
+            )
+            return
+        }
         if let name = plan.playlistName {
             playlistName = name
         }
@@ -920,8 +1312,16 @@ final class AppModel: ObservableObject {
         }
         if plan.replaceQueue {
             await replaceTracks(with: plan.urls)
+            shouldFocusTransfer = true
+            var message = "“\(playlistName)” — \(tracks.count) track(s)."
+            if plan.skipped > 0 {
+                message += " Skipped \(plan.skipped) cloud-only/DRM."
+            }
+            message += " Tap Send to Watch."
+            presentNotice(.success, title: "Playlist ready", message: message, alsoLog: false)
         } else {
             await addFiles(plan.urls)
+            shouldFocusTransfer = true
         }
     }
 
@@ -936,8 +1336,12 @@ final class AppModel: ObservableObject {
         isScanning = false
         isManagingDeviceFiles = false
         syncProgress = 0
+        transferProgress = nil
+        shouldFocusOnWatch = false
+        shouldFocusTransfer = false
         showSyncPreview = false
         syncPreview = nil
+        userNotice = nil
         searchText = ""
         tracks.removeAll()
         lastFailedTrackIDs = []
@@ -960,7 +1364,10 @@ final class AppModel: ObservableObject {
         settingsReady = false
         playlistName = settingsStore.playlistName
         syncSettings = settingsStore.syncSettings
+        alwaysPreviewBeforeSend = settingsStore.alwaysPreviewBeforeSend
+        performanceSettings = settingsStore.performanceSettings
         settingsReady = true
+        applyPerformanceSettings()
         deviceBrowser.clear(message: "App state reset. Refresh or choose a Garmin destination to start again.")
         transferLogStore.clear()
         transferLog = []
@@ -973,6 +1380,104 @@ final class AppModel: ObservableObject {
         persistSettingsIfReady(force: true)
     }
 
+    /// Restore Performance knobs to Balanced shipping defaults (does not reset sync policies).
+    func restorePerformanceDefaults() {
+        performanceSettings = .template(for: .balanced)
+    }
+
+    /// Apply a named performance preset (ignores `.custom`).
+    func applyPerformancePreset(_ preset: PerformancePreset) {
+        guard preset != .custom else { return }
+        performanceSettings = .template(for: preset)
+    }
+
+    private func applyPerformanceSettings() {
+        let settings = performanceSettings.clamped
+        deviceBrowser.listingReuseTTL = settings.listingReuseSeconds
+        applyMTPClientConfiguration(settings)
+        connectMonitor?.reconfigure(
+            enabled: settings.autoDetectDevices,
+            pollInterval: settings.usbPollIntervalSeconds
+        )
+        // Refresh MTP backend flags when already configured for MTP.
+        if deviceBrowser.backendKind == .mtp {
+            configureMTPBrowser()
+        }
+    }
+
+    private func applyMTPClientConfiguration(_ settings: PerformanceSettings) {
+        let s = settings.clamped
+        let updatePlaylist = lifecycleSettings.playlistWriteStrategy == .updateIfExists
+        MTPHelperClient.configure(
+            uploadChunkSize: s.uploadBatchSize,
+            idleTimeout: s.mtpSessionKeepAliveSeconds,
+            retryAttempts: s.mtpRetryAttempts,
+            retryBackoff: s.mtpRetryBackoffSeconds,
+            timeoutScale: s.operationTimeoutScale,
+            verifyUploads: s.verifyUploads,
+            updateExistingPlaylist: updatePlaylist
+        )
+    }
+
+    private func applyLibrarySettings(initial: Bool = false) {
+        let lib = librarySettings.clamped
+        MusicCompatibilityEvaluator.largeFileWarningBytes = lib.largeFileWarningBytes
+        TrackMatching.matchMode = lib.duplicateMatchMode
+        TrackMatching.durationToleranceSeconds = lib.durationMatchToleranceSeconds
+        if !initial {
+            deviceBrowser.sortOrder = lib.defaultDeviceSort
+            if lib.autoDeselectDuplicates {
+                tracks = macLibrarySession.applyAutoDeselectDuplicates(tracks, enabled: true)
+            }
+        } else {
+            deviceBrowser.sortOrder = lib.defaultDeviceSort
+        }
+    }
+
+    private func applyConversionSettings(initial: Bool = false) {
+        let conv = conversionSettings.clamped
+        AudioConverter.customFFmpegPath = conv.resolvedFFmpegPath
+        MusicCompatibilityEvaluator.convertWAV = conv.convertWAV
+    }
+
+    private func applyLifecycleSettings(initial: Bool = false) {
+        let life = lifecycleSettings.clamped
+        MTPSyncPlanner.remoteMusicRoot = life.remoteMusicRoot
+        if !initial {
+            applyMTPClientConfiguration(performanceSettings)
+        }
+    }
+
+    private func handleSendFinished(success: Bool, detail: UserNotice?) {
+        if let detail {
+            presentNotice(detail, alsoLog: false)
+        }
+        if success, conversionSettings.clearCacheAfterSuccessfulSend {
+            try? AudioConverter.clearTemporaryConversions()
+        }
+        if lifecycleSettings.releaseHelperAfterSend {
+            Task { await MTPHelperClient.shutdownSharedHelper() }
+        }
+        if lifecycleSettings.notifyOnSendComplete {
+            postSendNotification(success: success)
+        }
+    }
+
+    private func postSendNotification(success: Bool) {
+        // Prefer in-app notice; system notifications require UserNotifications authorization.
+        if userNotice == nil {
+            presentNotice(
+                success ? .success : .warning,
+                title: success ? "Send complete" : "Send finished with issues",
+                message: success
+                    ? "Tracks were sent to your Garmin."
+                    : "Check the transfer log for details.",
+                alsoLog: false
+            )
+        }
+        NSSound.beep()
+    }
+
     private func persistSettingsIfReady(force: Bool = false) {
         guard settingsReady || force else { return }
         guard !isPersistingSettings else { return }
@@ -983,6 +1488,11 @@ final class AppModel: ObservableObject {
         settingsStore.syncSettings = syncSettings
         settingsStore.advancedStorageExplorerEnabled = advancedStorageExplorerEnabled
         settingsStore.destructiveConfirmationMode = destructiveConfirmationMode
+        settingsStore.alwaysPreviewBeforeSend = alwaysPreviewBeforeSend
+        settingsStore.performanceSettings = performanceSettings
+        settingsStore.librarySettings = librarySettings
+        settingsStore.conversionSettings = conversionSettings
+        settingsStore.lifecycleSettings = lifecycleSettings
         settingsStore.lastDeviceBrowseMode = advancedStorageExplorerEnabled ? deviceBrowser.browseMode : .musicOnly
         settingsStore.destinationMode = destinationMode
         if destinationMode == .customFolder {
@@ -995,6 +1505,7 @@ final class AppModel: ObservableObject {
     private func replaceTracks(with urls: [URL]) async {
         let result = await macLibrarySession.replaceTracks(
             with: urls,
+            library: librarySettings,
             setScanning: { [weak self] value in self?.isScanning = value }
         )
         tracks = result.tracks
@@ -1004,6 +1515,11 @@ final class AppModel: ObservableObject {
     private func appendLog(_ message: String) {
         transferLogStore.append(message)
         transferLog = transferLogStore.lines
+    }
+
+    /// Recent log lines for the Transfer activity panel (newest last).
+    var recentTransferLogLines: [String] {
+        Array(transferLog.suffix(40))
     }
 
     /// Logs conversion outcomes so missing ffmpeg / failed encodes are never silent.
@@ -1030,7 +1546,8 @@ final class AppModel: ObservableObject {
             deviceBrowser: deviceBrowser,
             connectedUSBDevices: connectedUSBDevices,
             connectedMTPDeviceName: connectedMTPDeviceName,
-            advancedStorageExplorerEnabled: advancedStorageExplorerEnabled
+            advancedStorageExplorerEnabled: advancedStorageExplorerEnabled,
+            includePlaylistContents: performanceSettings.includePlaylistContentsWhenBrowsing
         )
     }
 

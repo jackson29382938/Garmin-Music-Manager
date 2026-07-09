@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Simple vector mark used in the sidebar (matches Resources/AppIcon.svg).
+/// Simple vector mark for the window chrome (matches Resources/AppIcon.svg).
 struct AppLogoMark: View {
     var size: CGFloat = 28
 

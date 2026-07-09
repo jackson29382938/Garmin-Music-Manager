@@ -54,12 +54,15 @@ final class DeviceLibraryCoordinator {
         deviceBrowser: DeviceBrowserStore,
         connectedUSBDevices: [GarminUSBDevice],
         connectedMTPDeviceName: String?,
-        advancedStorageExplorerEnabled: Bool
+        advancedStorageExplorerEnabled: Bool,
+        includePlaylistContents: Bool = false
     ) {
         let device = connectedUSBDevices.first
         let deviceName = connectedMTPDeviceName ?? device?.displayName ?? "Garmin watch"
         let deviceID = device?.dedupeKey ?? deviceName
-        deviceBrowser.configure(backend: MTPDeviceFileSystem(deviceID: deviceID, displayName: deviceName))
+        let fs = MTPDeviceFileSystem(deviceID: deviceID, displayName: deviceName)
+        fs.includePlaylistContents = includePlaylistContents
+        deviceBrowser.configure(backend: fs)
         if deviceBrowser.browseMode == .advancedStorage && !advancedStorageExplorerEnabled {
             deviceBrowser.setBrowseMode(.musicOnly, advancedEnabled: false)
         }

@@ -11,8 +11,12 @@ final class LibraryImportCoordinator {
         var playlistsExpanded: Int
     }
 
-    func scanFiles(_ urls: [URL]) async -> [AudioTrack] {
-        await scanner.scanFiles(urls)
+    func scanFiles(
+        _ urls: [URL],
+        fastImport: Bool = false,
+        maxConcurrency: Int = 0
+    ) async -> [AudioTrack] {
+        await scanner.scanFiles(urls, fastImport: fastImport, maxConcurrency: maxConcurrency)
     }
 
     func findAudioFiles(in folder: URL) -> [URL] {

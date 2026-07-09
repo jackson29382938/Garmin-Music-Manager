@@ -33,7 +33,7 @@ final class SyncService {
         playlistName: String,
         destination: URL,
         settings: SyncSettings,
-        progress: @escaping @Sendable (Double, String?) -> Void
+        progress: @escaping @Sendable (TransferProgressSnapshot) -> Void
     ) async throws -> SyncResult {
         try await Task.detached(priority: .userInitiated) {
             let cleanPlaylistName = FileNameSanitizer.sanitizeFileName(playlistName)
@@ -43,6 +43,17 @@ final class SyncService {
             var copiedURLs: [(url: URL, displayName: String, durationSeconds: Double?)] = []
             var skipped = 0
             var replaced = 0
+            let total = max(tracks.count, 1)
+
+            func report(_ index: Int, _ message: String, name: String) {
+                progress(TransferProgressSnapshot(
+                    fraction: Double(index + 1) / Double(total),
+                    message: message,
+                    itemIndex: index,
+                    itemCount: tracks.count,
+                    itemName: name
+                ))
+            }
 
             for (index, track) in tracks.enumerated() {
                 try Task.checkCancellation()
@@ -53,10 +64,7 @@ final class SyncService {
                 switch action {
                 case .skipIdentical:
                     skipped += 1
-                    progress(
-                        Double(index + 1) / Double(max(tracks.count, 1)),
-                        "Skipped identical: \(track.fileName)"
-                    )
+                    report(index, "Skipped identical: \(track.fileName)", name: track.fileName)
                 case .replace:
                     try self.fileManager.createDirectory(
                         at: targetURL.deletingLastPathComponent(),
@@ -68,10 +76,7 @@ final class SyncService {
                     }
                     try self.fileManager.copyItem(at: track.url, to: targetURL)
                     copiedURLs.append((targetURL, track.playlistDisplayName, track.durationSeconds))
-                    progress(
-                        Double(index + 1) / Double(max(tracks.count, 1)),
-                        "Replaced \(track.fileName)"
-                    )
+                    report(index, "Replaced \(track.fileName)", name: track.fileName)
                 case .keepBoth:
                     try self.fileManager.createDirectory(
                         at: targetURL.deletingLastPathComponent(),
@@ -80,10 +85,7 @@ final class SyncService {
                     let uniqueURL = FileNameSanitizer.uniqueURL(in: targetURL.deletingLastPathComponent(), preferredFileName: targetURL.lastPathComponent)
                     try self.fileManager.copyItem(at: track.url, to: uniqueURL)
                     copiedURLs.append((uniqueURL, track.playlistDisplayName, track.durationSeconds))
-                    progress(
-                        Double(index + 1) / Double(max(tracks.count, 1)),
-                        "Copied as \(uniqueURL.lastPathComponent)"
-                    )
+                    report(index, "Copied as \(uniqueURL.lastPathComponent)", name: uniqueURL.lastPathComponent)
                 case .copy:
                     try self.fileManager.createDirectory(
                         at: targetURL.deletingLastPathComponent(),
@@ -91,10 +93,7 @@ final class SyncService {
                     )
                     try self.fileManager.copyItem(at: track.url, to: targetURL)
                     copiedURLs.append((targetURL, track.playlistDisplayName, track.durationSeconds))
-                    progress(
-                        Double(index + 1) / Double(max(tracks.count, 1)),
-                        "Copied \(track.fileName)"
-                    )
+                    report(index, "Copied \(track.fileName)", name: track.fileName)
                 }
             }
 

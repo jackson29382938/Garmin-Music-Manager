@@ -72,7 +72,10 @@ final class MTPHelperRunner {
                 return try withSession { session in
                     MTPHelperResponse(
                         ok: true,
-                        operationResult: try session.upload(request.uploadFiles),
+                        operationResult: try session.upload(
+                            request.uploadFiles,
+                            verifyUploads: request.verifyUploads
+                        ),
                         dependencyStatus: dependencyStatus
                     )
                 }
@@ -90,7 +93,8 @@ final class MTPHelperRunner {
                         ok: true,
                         operationResult: try session.createPlaylist(
                             name: request.playlistName,
-                            trackFiles: request.files
+                            trackFiles: request.files,
+                            updateExisting: request.updateExistingPlaylist
                         ),
                         dependencyStatus: dependencyStatus
                     )

@@ -25,6 +25,10 @@ public struct MTPHelperRequest: Codable, Hashable {
     /// When true, `listMusic` downloads on-device `.m3u`/`.m3u8` bodies to build
     /// file-based playlist collections. Expensive on Garmin; default false.
     public var includePlaylistContents: Bool
+    /// When false, skip post-upload size verification (faster, less safe). Default true.
+    public var verifyUploads: Bool
+    /// When false, always create a new playlist instead of updating same-name. Default true.
+    public var updateExistingPlaylist: Bool
 
     public init(
         operation: MTPHelperOperation,
@@ -33,7 +37,9 @@ public struct MTPHelperRequest: Codable, Hashable {
         destinationPath: String? = nil,
         browseMode: DeviceBrowseMode = .musicOnly,
         playlistName: String? = nil,
-        includePlaylistContents: Bool = false
+        includePlaylistContents: Bool = false,
+        verifyUploads: Bool = true,
+        updateExistingPlaylist: Bool = true
     ) {
         self.operation = operation
         self.files = files
@@ -42,6 +48,8 @@ public struct MTPHelperRequest: Codable, Hashable {
         self.browseMode = browseMode
         self.playlistName = playlistName
         self.includePlaylistContents = includePlaylistContents
+        self.verifyUploads = verifyUploads
+        self.updateExistingPlaylist = updateExistingPlaylist
     }
 
     public init(from decoder: Decoder) throws {
@@ -53,6 +61,8 @@ public struct MTPHelperRequest: Codable, Hashable {
         browseMode = try container.decodeIfPresent(DeviceBrowseMode.self, forKey: .browseMode) ?? .musicOnly
         playlistName = try container.decodeIfPresent(String.self, forKey: .playlistName)
         includePlaylistContents = try container.decodeIfPresent(Bool.self, forKey: .includePlaylistContents) ?? false
+        verifyUploads = try container.decodeIfPresent(Bool.self, forKey: .verifyUploads) ?? true
+        updateExistingPlaylist = try container.decodeIfPresent(Bool.self, forKey: .updateExistingPlaylist) ?? true
     }
 }
 

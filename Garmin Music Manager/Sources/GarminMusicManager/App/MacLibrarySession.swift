@@ -18,8 +18,45 @@ final class MacLibrarySession {
 
     // MARK: - Computed helpers (pure)
 
-    func syncableTracks(from tracks: [AudioTrack]) -> [AudioTrack] {
-        tracks.filter { $0.compatibility.canCopy && $0.isSelected }
+    func syncableTracks(
+        from tracks: [AudioTrack],
+        skipDuplicates: Bool = false
+    ) -> [AudioTrack] {
+        tracks.filter { track in
+            guard track.compatibility.canCopy, track.isSelected else { return false }
+            if skipDuplicates, track.isDuplicateOnDevice { return false }
+            return true
+        }
+    }
+
+    /// Applies import selection policy after scan / duplicate detection.
+    func applyImportSelection(
+        _ tracks: [AudioTrack],
+        mode: ImportSelectionMode
+    ) -> [AudioTrack] {
+        tracks.map { track in
+            var copy = track
+            switch mode {
+            case .allReady:
+                copy.isSelected = track.compatibility.canCopy
+            case .none:
+                copy.isSelected = false
+            case .nonDuplicates:
+                copy.isSelected = track.compatibility.canCopy && !track.isDuplicateOnDevice
+            }
+            return copy
+        }
+    }
+
+    func applyAutoDeselectDuplicates(_ tracks: [AudioTrack], enabled: Bool) -> [AudioTrack] {
+        guard enabled else { return tracks }
+        return tracks.map { track in
+            var copy = track
+            if track.isDuplicateOnDevice {
+                copy.isSelected = false
+            }
+            return copy
+        }
     }
 
     func blockedTracks(from tracks: [AudioTrack]) -> [AudioTrack] {
@@ -107,6 +144,7 @@ final class MacLibrarySession {
     func addFiles(
         _ urls: [URL],
         into tracks: [AudioTrack],
+        library: LibrarySettings = .default,
         setScanning: (Bool) -> Void
     ) async -> ImportResult {
         guard !urls.isEmpty else {
@@ -133,11 +171,20 @@ final class MacLibrarySession {
             )
         }
 
-        let scanned = await scanner.scanFiles(expansion.audioURLs)
+        let lib = library.clamped
+        var scanned = await scanner.scanFiles(
+            expansion.audioURLs,
+            fastImport: lib.fastImport,
+            maxConcurrency: lib.importConcurrency
+        )
+        scanned = applyImportSelection(scanned, mode: lib.importSelectionMode)
         let merged = libraryImportCoordinator.mergeTracks(existing: tracks, newTracks: scanned)
         var message = "Added \(scanned.count) file(s)."
         if expansion.playlistsExpanded > 0 {
             message += " Expanded \(expansion.playlistsExpanded) playlist file(s)."
+        }
+        if lib.fastImport {
+            message += " (fast import)"
         }
         return ImportResult(
             tracks: merged,
@@ -151,6 +198,7 @@ final class MacLibrarySession {
     /// Replaces the queue with scanned tracks from the given URLs (order preserved).
     func replaceTracks(
         with urls: [URL],
+        library: LibrarySettings = .default,
         setScanning: (Bool) -> Void
     ) async -> ImportResult {
         guard !urls.isEmpty else {
@@ -159,7 +207,13 @@ final class MacLibrarySession {
         setScanning(true)
         defer { setScanning(false) }
 
-        let scanned = await scanner.scanFiles(urls)
+        let lib = library.clamped
+        var scanned = await scanner.scanFiles(
+            urls,
+            fastImport: lib.fastImport,
+            maxConcurrency: lib.importConcurrency
+        )
+        scanned = applyImportSelection(scanned, mode: lib.importSelectionMode)
         return ImportResult(
             tracks: scanned,
             addedCount: scanned.count,
@@ -172,6 +226,10 @@ final class MacLibrarySession {
     func removeTracks(at offsets: IndexSet, filtered: [AudioTrack], from tracks: [AudioTrack]) -> [AudioTrack] {
         let idsToRemove = Set(offsets.map { filtered[$0].id })
         return tracks.filter { !idsToRemove.contains($0.id) }
+    }
+
+    func removeTracks(ids: Set<UUID>, from tracks: [AudioTrack]) -> [AudioTrack] {
+        tracks.filter { !ids.contains($0.id) }
     }
 
     func selectAllReady(in tracks: [AudioTrack]) -> [AudioTrack] {
@@ -209,14 +267,23 @@ final class MacLibrarySession {
     }
 
     /// Restores tracks that still exist on disk from the last session.
-    func restoreQueue(setScanning: (Bool) -> Void) async -> ImportResult? {
+    func restoreQueue(
+        library: LibrarySettings = .default,
+        setScanning: (Bool) -> Void
+    ) async -> ImportResult? {
+        guard library.restoreQueueOnLaunch else { return nil }
         let restored = libraryQueueStore.restoreExisting()
         guard !restored.urls.isEmpty else { return nil }
 
         setScanning(true)
         defer { setScanning(false) }
 
-        var scanned = await scanner.scanFiles(restored.urls)
+        let lib = library.clamped
+        var scanned = await scanner.scanFiles(
+            restored.urls,
+            fastImport: lib.fastImport,
+            maxConcurrency: lib.importConcurrency
+        )
         for index in scanned.indices {
             let path = scanned[index].url.standardizedFileURL.path
             if let selected = restored.selection[path] {
