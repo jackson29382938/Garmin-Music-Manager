@@ -39,12 +39,20 @@ struct LifecycleSettings: Codable, Equatable {
     )
 
     mutating func clamp() {
-        let parts = remoteMusicRoot
+        let cleaned = remoteMusicRoot
             .replacingOccurrences(of: "\\", with: "/")
-            .split(separator: "/")
-            .map { FileNameSanitizer.sanitizePathComponent(String($0)) }
+            .split(separator: "/", omittingEmptySubsequences: true)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty && $0 != "." }
-        remoteMusicRoot = parts.isEmpty ? "Music" : parts.joined(separator: "/")
+            .map { component -> String in
+                // Avoid PathSanitizer's empty → "Unknown" for whitespace-only segments.
+                let invalid = CharacterSet(charactersIn: "/\\?%*|\"<>:")
+                let stripped = component.components(separatedBy: invalid).joined(separator: "-")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                return stripped.isEmpty ? "" : stripped
+            }
+            .filter { !$0.isEmpty }
+        remoteMusicRoot = cleaned.isEmpty ? "Music" : cleaned.joined(separator: "/")
     }
 
     var clamped: LifecycleSettings {

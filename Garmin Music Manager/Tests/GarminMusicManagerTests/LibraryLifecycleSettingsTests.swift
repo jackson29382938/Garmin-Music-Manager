@@ -58,7 +58,6 @@ final class LibraryLifecycleSettingsTests: XCTestCase {
     }
 
     @MainActor
-    @MainActor
     func testSyncableTracksSkipsDuplicatesWhenEnabled() {
         let session = MacLibrarySession()
         let ready = AudioTrack(
