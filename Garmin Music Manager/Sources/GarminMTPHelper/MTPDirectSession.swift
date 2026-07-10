@@ -1269,22 +1269,8 @@ final class MTPDirectSession {
             playlistNames.insert(key)
         }
 
-        let grouped = Dictionary(grouping: files) { file in
-            let parent = (file.path as NSString).deletingLastPathComponent
-            return parent == "." ? "" : parent
-        }
-        for (folder, folderFiles) in grouped.sorted(by: { $0.key.localizedCaseInsensitiveCompare($1.key) == .orderedAscending }) {
-            guard !folder.isEmpty else { continue }
-            // Prefer top-level Music/Playlist-style folders; skip ultra-deep noise if huge.
-            collections.append(DeviceCollection(
-                id: "folder:\(folder)",
-                name: (folder as NSString).lastPathComponent,
-                kind: .folder,
-                fileIDs: folderFiles.map(\.id)
-            ))
-        }
-
-        // All Music, then playlists (A–Z), then albums/folders (A–Z).
+        // All Music, then playlists (A–Z). Folder/album path groups are omitted —
+        // the watch UI should only surface All Music and playlists.
         return collections.sorted { lhs, rhs in
             let lhsRank = collectionSortRank(lhs.kind)
             let rhsRank = collectionSortRank(rhs.kind)

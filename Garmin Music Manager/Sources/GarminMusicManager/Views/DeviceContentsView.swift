@@ -7,6 +7,8 @@ struct DeviceContentsView: View {
     @EnvironmentObject private var model: AppModel
     /// When embedded under On Watch, the parent already provides title/refresh.
     var showsPanelHeader: Bool = true
+    /// When true (File Manager), selected files can be dragged to the Mac pane.
+    var enablesOutboundDrag: Bool = false
     @State private var isUploadDropTarget = false
     @State private var availableWidth: CGFloat = 0
 
@@ -174,6 +176,12 @@ struct DeviceContentsView: View {
             }
             .listStyle(.sidebar)
             .contextMenu {
+                Button {
+                    model.startCreatePlaylistFromSelection()
+                } label: {
+                    Label("New Playlist…", systemImage: "music.note.list")
+                }
+                .disabled(!model.canCreatePlaylistFromSelection)
                 Button {
                     refreshDeviceLibrary()
                 } label: {
@@ -376,6 +384,11 @@ struct DeviceContentsView: View {
         Label(file.name, systemImage: systemImage(for: file))
             .lineLimit(1)
             .truncationMode(.middle)
+            .modifier(DeviceFileDragModifier(
+                enabled: enablesOutboundDrag && file.type != .folder,
+                file: file,
+                selectedIDs: model.deviceBrowser.selectedFileIDs
+            ))
     }
 
     /// Finder-style: right-click outside the selection selects only that file;
@@ -400,9 +413,21 @@ struct DeviceContentsView: View {
             prepareDeviceSelection(for: file)
             model.startMoveSelectedWithinGarmin()
         } label: {
-            Label("Move Within Garmin", systemImage: "folder")
+            Label("Move Within Garmin", systemImage: "music.note.list")
         }
         .disabled(model.isManagingDeviceFiles || file.type == .folder)
+
+        Button {
+            prepareDeviceSelection(for: file)
+            model.startCreatePlaylistFromSelection()
+        } label: {
+            Label("New Playlist…", systemImage: "music.note.list")
+        }
+        .disabled(
+            model.isManagingDeviceFiles
+                || file.type != .audio
+                || model.deviceBrowser.backendKind != .mtp
+        )
 
         Button(role: .destructive) {
             prepareDeviceSelection(for: file)
@@ -669,6 +694,30 @@ struct DeviceContentsView: View {
             return "folder"
         case .other:
             return "doc"
+        }
+    }
+}
+
+/// Applies outbound device-file drag when File Manager embeds the Garmin pane.
+private struct DeviceFileDragModifier: ViewModifier {
+    let enabled: Bool
+    let file: DeviceFile
+    let selectedIDs: Set<String>
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.onDrag {
+                let ids: [String]
+                if selectedIDs.contains(file.id) {
+                    ids = Array(selectedIDs)
+                } else {
+                    ids = [file.id]
+                }
+                return DeviceFileDragPayload.itemProvider(for: ids)
+            }
+        } else {
+            content
         }
     }
 }

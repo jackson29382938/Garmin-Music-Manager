@@ -25,6 +25,43 @@ final class DeviceSessionControllerTests: XCTestCase {
         )
     }
 
+    func testMergedPlaylistTracksAddsSelectionToExistingPlaylist() {
+        let session = DeviceSessionController()
+        let browser = DeviceBrowserStore()
+        let existing = DeviceFile(
+            objectID: "1",
+            name: "a.mp3",
+            type: .audio,
+            size: 10,
+            path: "Music/Mix/a.mp3",
+            backendKind: .mtp
+        )
+        let addition = DeviceFile(
+            objectID: "2",
+            name: "b.mp3",
+            type: .audio,
+            size: 10,
+            path: "Music/Other/b.mp3",
+            backendKind: .mtp
+        )
+        browser.files = [existing, addition]
+        browser.collections = [
+            DeviceCollection(
+                id: "playlist:1",
+                name: "Mix",
+                kind: .playlist,
+                fileIDs: [existing.id]
+            )
+        ]
+
+        let merged = session.mergedPlaylistTracks(
+            named: "Mix",
+            adding: [addition],
+            deviceBrowser: browser
+        )
+        XCTAssertEqual(merged.map(\.name).sorted(), ["a.mp3", "b.mp3"])
+    }
+
     func testShouldConfirmDeleteRespectsModes() {
         let session = DeviceSessionController()
         let file = DeviceFile(

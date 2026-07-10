@@ -80,7 +80,7 @@ final class MountedFolderDeviceFileSystem: DeviceFileSystem {
             let files = try self.listFiles(includeAllFiles: false)
             return DeviceFileSystemSnapshot(
                 files: files,
-                collections: self.collections(for: files, includeFolders: true),
+                collections: self.collections(for: files, includeFolders: false),
                 storageInfo: self.storageInfoSync(for: files),
                 deviceName: self.displayName,
                 diagnosticMessage: files.isEmpty ? "No compatible audio files were found in this folder." : nil

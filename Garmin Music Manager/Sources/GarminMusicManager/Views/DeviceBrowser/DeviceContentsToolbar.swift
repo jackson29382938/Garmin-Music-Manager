@@ -63,6 +63,7 @@ struct DeviceContentsToolbar: View {
             Group {
                 HStack(spacing: 8) {
                     addToGarminButton
+                    createPlaylistButton
                     deleteButton
                     Menu {
                         copyToMacButton
@@ -79,6 +80,7 @@ struct DeviceContentsToolbar: View {
                         refreshButton
                         copyToMacButton
                         addToGarminButton
+                        createPlaylistButton
                         moveButton
                         deleteButton
                     }
@@ -87,6 +89,7 @@ struct DeviceContentsToolbar: View {
                         refreshButton
                         copyToMacButton
                         addToGarminButton
+                        createPlaylistButton
                         moveButton
                         deleteButton
                     } label: {
@@ -125,14 +128,24 @@ struct DeviceContentsToolbar: View {
         .help("Add music files to the Garmin")
     }
 
+    private var createPlaylistButton: some View {
+        Button {
+            model.startCreatePlaylistFromSelection()
+        } label: {
+            Label("New Playlist", systemImage: "music.note.list")
+        }
+        .disabled(!model.canCreatePlaylistFromSelection)
+        .help("Create a playlist on the watch from the selected tracks")
+    }
+
     private var moveButton: some View {
         Button {
             model.startMoveSelectedWithinGarmin()
         } label: {
-            Label("Move Within Garmin", systemImage: "folder")
+            Label("Move Within Garmin", systemImage: "music.note.list")
         }
         .disabled(!model.canMoveSelectedDeviceFiles)
-        .help("Move selected files to another Garmin folder")
+        .help("Move selected files into a playlist on the Garmin")
     }
 
     private var deleteButton: some View {

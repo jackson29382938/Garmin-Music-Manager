@@ -288,10 +288,47 @@ final class DeviceSessionController {
         panel.canChooseFiles = false
 
         guard panel.runModal() == .OK, let destination = panel.url else { return }
+        downloadSelected(
+            deviceBrowser: deviceBrowser,
+            to: destination,
+            setManaging: setManaging,
+            log: log
+        )
+    }
+
+    /// Copies selected Garmin files into an explicit Mac folder (File Manager drop / Copy here).
+    func downloadSelected(
+        deviceBrowser: DeviceBrowserStore,
+        to destination: URL,
+        setManaging: @escaping (Bool) -> Void,
+        log: @escaping (String) -> Void
+    ) {
+        downloadFiles(
+            withIDs: deviceBrowser.selectedFiles.filter { $0.type != .folder }.map(\.id),
+            deviceBrowser: deviceBrowser,
+            to: destination,
+            setManaging: setManaging,
+            log: log
+        )
+    }
+
+    /// Downloads specific device files (by id) into a Mac folder.
+    func downloadFiles(
+        withIDs fileIDs: [String],
+        deviceBrowser: DeviceBrowserStore,
+        to destination: URL,
+        setManaging: @escaping (Bool) -> Void,
+        log: @escaping (String) -> Void
+    ) {
+        guard !fileIDs.isEmpty else { return }
+
+        let previousSelection = deviceBrowser.selectedFileIDs
+        deviceBrowser.selectedFileIDs = Set(fileIDs)
 
         setManaging(true)
         deviceFileTask = Task {
             defer {
+                deviceBrowser.selectedFileIDs = previousSelection
                 setManaging(false)
                 deviceFileTask = nil
             }
@@ -311,6 +348,7 @@ final class DeviceSessionController {
         path: String,
         playlistName: String,
         activeDestination: URL?,
+        updatePlaylistMembership: Bool = true,
         setManaging: @escaping (Bool) -> Void,
         setShowMTPMoveDeleteConfirmation: @escaping (Bool) -> Void,
         onFinished: @escaping () -> Void,
@@ -337,6 +375,16 @@ final class DeviceSessionController {
                     let failedNames = Set(result.failedItems)
                     pendingMTPMoveOriginals = files.filter { !failedNames.contains($0.name) }
                     setShowMTPMoveDeleteConfirmation(!pendingMTPMoveOriginals.isEmpty)
+
+                    if updatePlaylistMembership {
+                        await updatePlaylistAfterMove(
+                            named: playlistName,
+                            movedFiles: files.filter { !failedNames.contains($0.name) },
+                            target: target,
+                            deviceBrowser: deviceBrowser,
+                            log: log
+                        )
+                    }
                 }
             } else if let activeDestination {
                 result = await deviceBrowser.moveSelected(to: target.destinationURL(relativeTo: activeDestination))
@@ -353,6 +401,95 @@ final class DeviceSessionController {
             onFinished()
         }
         return target.storagePath
+    }
+
+    /// Merges `adding` into an existing on-watch playlist (by name), or returns `adding` alone.
+    func mergedPlaylistTracks(
+        named name: String,
+        adding selected: [DeviceFile],
+        deviceBrowser: DeviceBrowserStore
+    ) -> [DeviceFile] {
+        let cleanName = FileNameSanitizer.sanitizeFileName(name)
+        let filesByID = Dictionary(uniqueKeysWithValues: deviceBrowser.files.map { ($0.id, $0) })
+        var tracks: [DeviceFile] = []
+        var seen = Set<String>()
+
+        if let collection = deviceBrowser.collections.first(where: {
+            $0.kind == .playlist && $0.name.caseInsensitiveCompare(cleanName) == .orderedSame
+        }) {
+            for id in collection.fileIDs {
+                guard let file = filesByID[id], seen.insert(file.id).inserted else { continue }
+                tracks.append(file)
+            }
+        }
+
+        for file in selected where file.type == .audio {
+            guard seen.insert(file.id).inserted else { continue }
+            tracks.append(file)
+        }
+
+        return tracks
+    }
+
+    private func updatePlaylistAfterMove(
+        named playlistName: String,
+        movedFiles: [DeviceFile],
+        target: GarminFolderTarget,
+        deviceBrowser: DeviceBrowserStore,
+        log: @escaping (String) -> Void
+    ) async {
+        let cleanName = FileNameSanitizer.sanitizeFileName(playlistName)
+        guard !cleanName.isEmpty, !movedFiles.isEmpty else { return }
+
+        let movedNames = Set(movedFiles.map { $0.name.lowercased() })
+        let folderPrefix = target.storagePath.lowercased() + "/"
+        let folderExact = target.storagePath.lowercased()
+
+        // Prefer newly copied files under the playlist folder; fall back to originals still on device.
+        var additions: [DeviceFile] = []
+        var seen = Set<String>()
+        for file in deviceBrowser.files where file.type == .audio {
+            let path = file.path.lowercased()
+            let parent = (file.path as NSString).deletingLastPathComponent.lowercased()
+            let inPlaylistFolder = path.hasPrefix(folderPrefix) || parent == folderExact
+            guard inPlaylistFolder, movedNames.contains(file.name.lowercased()) else { continue }
+            guard seen.insert(file.id).inserted else { continue }
+            additions.append(file)
+        }
+
+        if additions.count < movedFiles.count {
+            for file in movedFiles where file.type == .audio {
+                guard seen.insert(file.id).inserted else { continue }
+                additions.append(file)
+            }
+        }
+
+        // Drop old copies of the same filenames from the existing playlist before merging.
+        let existing = deviceBrowser.collections.first(where: {
+            $0.kind == .playlist && $0.name.caseInsensitiveCompare(cleanName) == .orderedSame
+        })
+        let filesByID = Dictionary(uniqueKeysWithValues: deviceBrowser.files.map { ($0.id, $0) })
+        var merged: [DeviceFile] = []
+        var mergedSeen = Set<String>()
+        if let existing {
+            for id in existing.fileIDs {
+                guard let file = filesByID[id] else { continue }
+                if movedNames.contains(file.name.lowercased()) { continue }
+                guard mergedSeen.insert(file.id).inserted else { continue }
+                merged.append(file)
+            }
+        }
+        for file in additions {
+            guard mergedSeen.insert(file.id).inserted else { continue }
+            merged.append(file)
+        }
+
+        guard !merged.isEmpty else { return }
+        if let result = await deviceBrowser.createPlaylist(name: cleanName, tracks: merged) {
+            log(result.message ?? "Updated playlist “\(cleanName)”.")
+        } else if let error = deviceBrowser.lastError {
+            log("Playlist not updated after move: \(error)")
+        }
     }
 
     func confirmDeleteOriginalsAfterMTPMove(

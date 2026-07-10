@@ -5,6 +5,7 @@ enum AppMode: String, CaseIterable, Identifiable {
     case guided
     case transfer
     case onWatch
+    case fileManager
     case settings
 
     var id: String { rawValue }
@@ -14,6 +15,7 @@ enum AppMode: String, CaseIterable, Identifiable {
         case .guided: return "Guided Transfer"
         case .transfer: return "Transfer"
         case .onWatch: return "On Watch"
+        case .fileManager: return "File Manager"
         case .settings: return "Settings"
         }
     }
@@ -24,6 +26,7 @@ enum AppMode: String, CaseIterable, Identifiable {
         case .guided: return "Guided"
         case .transfer: return "Transfer"
         case .onWatch: return "On Watch"
+        case .fileManager: return "File Manager"
         case .settings: return "Settings"
         }
     }
@@ -33,6 +36,7 @@ enum AppMode: String, CaseIterable, Identifiable {
         case .guided: return "sparkles.rectangle.stack.fill"
         case .transfer: return "arrow.down.circle.fill"
         case .onWatch: return "applewatch"
+        case .fileManager: return "folder"
         case .settings: return "gearshape"
         }
     }

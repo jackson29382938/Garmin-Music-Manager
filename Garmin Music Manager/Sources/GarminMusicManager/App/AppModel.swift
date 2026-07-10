@@ -41,6 +41,8 @@ final class AppModel: ObservableObject {
     @Published var showResetConfirmation = false
     @Published var showMoveWithinGarminSheet = false
     @Published var moveTargetPath = ""
+    @Published var showCreatePlaylistSheet = false
+    @Published var createPlaylistName = ""
     @Published var showMTPMoveDeleteConfirmation = false
     @Published var advancedStorageExplorerEnabled: Bool {
         didSet {
@@ -514,23 +516,37 @@ final class AppModel: ObservableObject {
             && !isManagingDeviceFiles
     }
 
-    var suggestedGarminMoveTargetPaths: [String] {
-        var paths = [defaultMoveTargetPath()]
-        let parentFolders = Set(deviceBrowser.files.map { file in
-            (file.path as NSString).deletingLastPathComponent
-        })
+    var canCreatePlaylistFromSelection: Bool {
+        deviceBrowser.isConfigured
+            && deviceBrowser.backendKind == .mtp
+            && selectedDeviceFiles.contains { $0.type == .audio }
+            && !isManagingDeviceFiles
+    }
 
-        for folder in parentFolders where !folder.isEmpty && folder != "." && folder != "/" {
-            paths.append(normalizedMoveTargetPath(folder))
+    /// Playlist names available as Move Within Garmin destinations (not Music/ folder paths).
+    var suggestedGarminMovePlaylists: [String] {
+        var names = deviceBrowser.collections
+            .filter { $0.kind == .playlist }
+            .map(\.name)
+
+        let defaultName = FileNameSanitizer.sanitizeFileName(playlistName)
+        if !names.contains(where: { $0.caseInsensitiveCompare(defaultName) == .orderedSame }) {
+            names.insert(defaultName, at: 0)
         }
 
         var seen: Set<String> = []
-        return paths.filter { path in
-            let key = path.lowercased()
+        return names.filter { name in
+            let key = name.lowercased()
             guard !seen.contains(key) else { return false }
             seen.insert(key)
             return true
         }
+        .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    /// Storage paths derived from playlist names (`Music/<Playlist>`).
+    var suggestedGarminMoveTargetPaths: [String] {
+        suggestedGarminMovePlaylists.map { GarminFolderTarget.defaultMovePath(playlistName: $0) }
     }
 
     var exceedsAvailableStorage: Bool {
@@ -1080,6 +1096,27 @@ final class AppModel: ObservableObject {
         )
     }
 
+    /// Copies selected Garmin files into `folder` without showing a destination panel.
+    func downloadSelectedDeviceFiles(to folder: URL) {
+        deviceSession.downloadSelected(
+            deviceBrowser: deviceBrowser,
+            to: folder,
+            setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
+            log: { [weak self] message in self?.handleDeviceOpLog(message) }
+        )
+    }
+
+    /// Copies the given Garmin file IDs into `folder` (File Manager drag-drop).
+    func downloadDeviceFiles(withIDs fileIDs: [String], to folder: URL) {
+        deviceSession.downloadFiles(
+            withIDs: fileIDs,
+            deviceBrowser: deviceBrowser,
+            to: folder,
+            setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
+            log: { [weak self] message in self?.handleDeviceOpLog(message) }
+        )
+    }
+
     func startMoveSelectedWithinGarmin() {
         let files = selectedDeviceFiles
         guard !files.isEmpty else { return }
@@ -1091,18 +1128,53 @@ final class AppModel: ObservableObject {
         startMoveSelectedWithinGarmin()
     }
 
-    func moveSelectedWithinGarmin(to path: String) {
+    /// Moves selected files into `Music/<playlistName>/` and updates the watch playlist.
+    func moveSelectedWithinGarmin(toPlaylist playlist: String) {
+        let cleanName = FileNameSanitizer.sanitizeFileName(playlist)
+        guard !cleanName.isEmpty else { return }
+        let path = GarminFolderTarget.defaultMovePath(playlistName: cleanName)
         showMoveWithinGarminSheet = false
         moveTargetPath = deviceSession.moveSelectedWithinGarmin(
             deviceBrowser: deviceBrowser,
             path: path,
-            playlistName: playlistName,
+            playlistName: cleanName,
             activeDestination: activeDestination,
+            updatePlaylistMembership: true,
             setManaging: { [weak self] value in self?.isManagingDeviceFiles = value },
             setShowMTPMoveDeleteConfirmation: { [weak self] value in self?.showMTPMoveDeleteConfirmation = value },
             onFinished: { [weak self] in self?.updateDuplicateFlags() },
             log: { [weak self] message in self?.handleDeviceOpLog(message) }
         )
+    }
+
+    func startCreatePlaylistFromSelection() {
+        guard canCreatePlaylistFromSelection else { return }
+        createPlaylistName = FileNameSanitizer.sanitizeFileName(playlistName)
+        showCreatePlaylistSheet = true
+    }
+
+    func createPlaylistFromSelection(named name: String) {
+        showCreatePlaylistSheet = false
+        let cleanName = FileNameSanitizer.sanitizeFileName(name)
+        guard !cleanName.isEmpty else { return }
+        let selected = selectedDeviceFiles.filter { $0.type == .audio }
+        guard !selected.isEmpty else { return }
+
+        isManagingDeviceFiles = true
+        Task {
+            defer { isManagingDeviceFiles = false }
+            let tracks = deviceSession.mergedPlaylistTracks(
+                named: cleanName,
+                adding: selected,
+                deviceBrowser: deviceBrowser
+            )
+            if let result = await deviceBrowser.createPlaylist(name: cleanName, tracks: tracks) {
+                handleDeviceOpLog(result.message ?? "Created playlist “\(cleanName)”.")
+                await deviceBrowser.refresh(force: true)
+            } else if let error = deviceBrowser.lastError {
+                handleDeviceOpLog("Playlist not created: \(error)")
+            }
+        }
     }
 
     func confirmDeleteOriginalsAfterMTPMove() {
@@ -1356,6 +1428,8 @@ final class AppModel: ObservableObject {
         connectedMTPDeviceName = nil
         moveTargetPath = ""
         showMoveWithinGarminSheet = false
+        showCreatePlaylistSheet = false
+        createPlaylistName = ""
         showMTPMoveDeleteConfirmation = false
         destinationMode = .autoDetected
         destinationOverride = nil

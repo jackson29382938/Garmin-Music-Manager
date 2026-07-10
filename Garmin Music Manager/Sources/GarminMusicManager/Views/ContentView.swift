@@ -80,6 +80,10 @@ struct ContentView: View {
             MoveWithinGarminSheet()
                 .environmentObject(model)
         }
+        .sheet(isPresented: $model.showCreatePlaylistSheet) {
+            CreatePlaylistSheet()
+                .environmentObject(model)
+        }
         .alert("Delete selected files?", isPresented: $model.showDeleteConfirmation) {
             Button("Delete", role: .destructive) {
                 model.deleteSelectedDeviceFiles()
@@ -164,7 +168,7 @@ struct ContentView: View {
 
             Divider()
 
-            ForEach([AppMode.transfer, .onWatch, .settings], id: \.id) { appMode in
+            ForEach([AppMode.transfer, .onWatch, .fileManager, .settings], id: \.id) { appMode in
                 Button {
                     mode = appMode
                 } label: {
@@ -221,6 +225,8 @@ struct ContentView: View {
                     TransferHomeView()
                 case .onWatch:
                     OnWatchView()
+                case .fileManager:
+                    FileManagerView()
                 case .settings:
                     SettingsView()
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -274,28 +280,44 @@ struct ContentView: View {
 private struct MoveWithinGarminSheet: View {
     @EnvironmentObject private var model: AppModel
     @Environment(\.dismiss) private var dismiss
-    @State private var targetPath = ""
+    @State private var selectedPlaylist = ""
+    @State private var isCreatingNew = false
+    @State private var newPlaylistName = ""
+
+    private var playlists: [String] { model.suggestedGarminMovePlaylists }
+
+    private var effectivePlaylistName: String {
+        if isCreatingNew {
+            return newPlaylistName.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return selectedPlaylist.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Label("Move Within Garmin", systemImage: "folder")
+            Label("Move Within Garmin", systemImage: "music.note.list")
                 .font(.title2.bold())
                 .foregroundStyle(AppTheme.panelAccent(for: .garmin))
 
-            Text("Choose a folder on the watch. Files are copied first; originals can be deleted after.")
+            Text("Choose a playlist on the watch. Selected tracks move into that playlist.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Picker("Folder", selection: $targetPath) {
-                ForEach(model.suggestedGarminMoveTargetPaths, id: \.self) { path in
-                    Text(path).tag(path)
+            Picker("Playlist", selection: $selectedPlaylist) {
+                ForEach(playlists, id: \.self) { name in
+                    Text(name).tag(name)
                 }
             }
             .pickerStyle(.menu)
+            .disabled(isCreatingNew || playlists.isEmpty)
 
-            TextField("Garmin folder path", text: $targetPath)
-                .textFieldStyle(.roundedBorder)
+            Toggle("Create new playlist", isOn: $isCreatingNew)
+
+            if isCreatingNew {
+                TextField("New playlist name", text: $newPlaylistName)
+                    .textFieldStyle(.roundedBorder)
+            }
 
             HStack {
                 Spacer()
@@ -305,16 +327,75 @@ private struct MoveWithinGarminSheet: View {
                 }
                 Button("Move") {
                     dismiss()
-                    model.moveSelectedWithinGarmin(to: targetPath)
+                    model.moveSelectedWithinGarmin(toPlaylist: effectivePlaylistName)
                 }
                 .buttonStyle(.borderedProminent)
-                .disabled(targetPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(effectivePlaylistName.isEmpty)
             }
         }
         .padding()
         .frame(width: 420)
         .onAppear {
-            targetPath = model.moveTargetPath
+            let existingPlaylists = model.deviceBrowser.collections
+                .filter { $0.kind == .playlist }
+                .map(\.name)
+            let defaultName = FileNameSanitizer.sanitizeFileName(model.playlistName)
+            if playlists.contains(where: { $0.caseInsensitiveCompare(defaultName) == .orderedSame }) {
+                selectedPlaylist = playlists.first {
+                    $0.caseInsensitiveCompare(defaultName) == .orderedSame
+                } ?? playlists.first ?? defaultName
+            } else {
+                selectedPlaylist = playlists.first ?? defaultName
+            }
+            newPlaylistName = defaultName
+            isCreatingNew = existingPlaylists.isEmpty
+        }
+    }
+}
+
+private struct CreatePlaylistSheet: View {
+    @EnvironmentObject private var model: AppModel
+    @Environment(\.dismiss) private var dismiss
+    @State private var name = ""
+
+    private var trackCount: Int {
+        model.selectedDeviceFiles.filter { $0.type == .audio }.count
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Label("New Playlist", systemImage: "music.note.list")
+                .font(.title2.bold())
+                .foregroundStyle(AppTheme.panelAccent(for: .garmin))
+
+            Text("Create a playlist on the watch from \(trackCount) selected track\(trackCount == 1 ? "" : "s").")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            TextField("Playlist name", text: $name)
+                .textFieldStyle(.roundedBorder)
+
+            HStack {
+                Spacer()
+                Button("Cancel") {
+                    dismiss()
+                    model.showCreatePlaylistSheet = false
+                }
+                Button("Create") {
+                    dismiss()
+                    model.createPlaylistFromSelection(named: name)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || trackCount == 0)
+            }
+        }
+        .padding()
+        .frame(width: 420)
+        .onAppear {
+            name = model.createPlaylistName.isEmpty
+                ? FileNameSanitizer.sanitizeFileName(model.playlistName)
+                : model.createPlaylistName
         }
     }
 }
