@@ -256,13 +256,14 @@ final class MusicScanner {
     }
 
     private func fourCharCodeString(_ code: FourCharCode) -> String {
-        let chars = [
-            Character(UnicodeScalar((code >> 24) & 255)!),
-            Character(UnicodeScalar((code >> 16) & 255)!),
-            Character(UnicodeScalar((code >> 8) & 255)!),
-            Character(UnicodeScalar(code & 255)!)
+        // Each byte is 0...255, so UnicodeScalar(UInt8:) is total — no force-unwrap.
+        let bytes: [UInt8] = [
+            UInt8((code >> 24) & 255),
+            UInt8((code >> 16) & 255),
+            UInt8((code >> 8) & 255),
+            UInt8(code & 255)
         ]
-        return String(chars)
+        return String(String.UnicodeScalarView(bytes.map(UnicodeScalar.init)))
     }
 
 }
