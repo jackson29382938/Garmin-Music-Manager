@@ -1,4 +1,5 @@
 import Foundation
+import GarminMusicCore
 
 struct AudioConverter {
     enum ConverterError: LocalizedError {
@@ -58,15 +59,30 @@ struct AudioConverter {
             attributes: [.posixPermissions: 0o700]
         )
 
-        let stem = source.deletingPathExtension().lastPathComponent
         let rateTag: String
         switch sampleRate {
         case .source: rateTag = "src"
         case .hz44100: rateTag = "44100"
         case .hz48000: rateTag = "48000"
         }
+
+        let bitrate = min(320, max(64, bitrateKbps))
+
+        // Content-addressed cache name: fold source identity (path + size +
+        // mtime) and encode parameters into the file name so two different
+        // sources that share a base filename never collide and reuse the wrong
+        // audio. See ConversionCacheNaming for the regression details.
+        let sourceAttributes = try? fileManager.attributesOfItem(atPath: source.path)
+        let sourceSize = (sourceAttributes?[.size] as? NSNumber)?.int64Value ?? 0
+        let sourceModified = Int64(((sourceAttributes?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0).rounded())
         let outputURL = outputDirectory.appendingPathComponent(
-            "\(stem)-b\(bitrateKbps)-\(rateTag)-converted.m4a"
+            ConversionCacheNaming.cacheFileName(
+                sourcePath: source.path,
+                sourceSizeBytes: sourceSize,
+                sourceModifiedEpoch: sourceModified,
+                bitrateKbps: bitrate,
+                sampleRateTag: rateTag
+            )
         )
 
         if reuseExisting, fileManager.fileExists(atPath: outputURL.path) {
@@ -77,8 +93,10 @@ struct AudioConverter {
             try? fileManager.removeItem(at: outputURL)
         }
 
-        let bitrate = min(320, max(64, bitrateKbps))
         var arguments = [
+            "-nostdin",
+            "-nostats",
+            "-loglevel", "error",
             "-y",
             "-i", source.path,
             "-c:a", "aac",
@@ -93,9 +111,23 @@ struct AudioConverter {
         process.executableURL = ffmpegURL
         process.arguments = arguments
 
+        // ffmpeg writes the encode to `outputURL`, not stdout, so discard stdout.
+        // stderr is captured for diagnostics. `-nostats -loglevel error` keeps
+        // stderr tiny; combined with draining it (below) this avoids the pipe
+        // buffer filling and dead-locking a long conversion.
         let pipe = Pipe()
         process.standardError = pipe
-        process.standardOutput = Pipe()
+        process.standardOutput = FileHandle.nullDevice
+
+        let stderrBuffer = LockedByteBuffer()
+        pipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if chunk.isEmpty {
+                handle.readabilityHandler = nil
+            } else {
+                stderrBuffer.append(chunk)
+            }
+        }
 
         try process.run()
 
@@ -110,12 +142,15 @@ struct AudioConverter {
             while process.isRunning && Date() < graceDeadline {
                 Thread.sleep(forTimeInterval: 0.1)
             }
+            pipe.fileHandleForReading.readabilityHandler = nil
             throw ConverterError.conversionFailed("ffmpeg timed out while converting \(source.lastPathComponent).")
         }
 
+        pipe.fileHandleForReading.readabilityHandler = nil
+
         guard process.terminationStatus == 0, fileManager.fileExists(atPath: outputURL.path) else {
-            let stderr = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-            throw ConverterError.conversionFailed(stderr.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "ffmpeg failed." : stderr.trimmingCharacters(in: .whitespacesAndNewlines))
+            let stderr = stderrBuffer.string().trimmingCharacters(in: .whitespacesAndNewlines)
+            throw ConverterError.conversionFailed(stderr.isEmpty ? "ffmpeg failed." : stderr)
         }
 
         return outputURL
@@ -137,5 +172,24 @@ struct AudioConverter {
             }
         }
         return nil
+    }
+}
+
+/// Thread-safe byte accumulator for draining a pipe on its readability queue
+/// while the main thread waits for the process to exit.
+private final class LockedByteBuffer: @unchecked Sendable {
+    private let lock = NSLock()
+    private var data = Data()
+
+    func append(_ chunk: Data) {
+        lock.lock()
+        data.append(chunk)
+        lock.unlock()
+    }
+
+    func string() -> String {
+        lock.lock()
+        defer { lock.unlock() }
+        return String(data: data, encoding: .utf8) ?? ""
     }
 }
