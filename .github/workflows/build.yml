@@ -43,3 +43,57 @@ jobs:
           else
             echo "warning: helper not linked to bundled libmtp (may need Homebrew at runtime)"
           fi
+
+  # The SwiftUI app and libmtp helper are macOS only. GarminMusicCore is pure
+  # Foundation, so it (plus the GarminMusicCLI console front-end) builds and runs
+  # on Windows. This job produces a native Windows GarminMusicCLI.exe.
+  windows-core-build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Swift toolchain
+        uses: compnerd/gha-setup-swift@main
+        with:
+          branch: swift-6.1.2-release
+          tag: 6.1.2-RELEASE
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build portable core + CLI (release)
+        run: swift build -c release --product GarminMusicCLI
+
+      - name: Test portable core
+        run: swift test
+
+      - name: Smoke-run CLI
+        run: swift run -c release GarminMusicCLI selftest
+
+      - name: Upload GarminMusicCLI.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: GarminMusicCLI-windows-x86_64
+          path: "Garmin Music Manager/.build/release/GarminMusicCLI.exe"
+          if-no-files-found: error
+
+  # Fast, Mac-free verification of the same portable core / CLI on Linux.
+  linux-core-build:
+    runs-on: ubuntu-latest
+    container: swift:6.1.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build portable core + CLI
+        run: swift build --product GarminMusicCLI
+
+      - name: Test portable core
+        run: swift test
+
+      - name: Smoke-run CLI
+        run: swift run GarminMusicCLI selftest
