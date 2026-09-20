@@ -215,6 +215,15 @@ actor PersistentMTPHelperTransport: MTPHelperTransport {
     }
 
     private func idleShutdownIfNeeded() {
+        // Never tear down the helper while a request is in flight. A long, silent
+        // phase (e.g. post-batch upload verification, or a large single file that
+        // libmtp reports no progress for) can exceed the keep-alive window even
+        // though the operation is still running; killing the process here would
+        // fail the request mid-flight. Reschedule and re-check later instead.
+        if inFlight {
+            scheduleIdleShutdown()
+            return
+        }
         guard Date().timeIntervalSince(lastUsed) >= idleTimeout - 0.5 else {
             scheduleIdleShutdown()
             return
@@ -483,11 +492,6 @@ struct SubprocessMTPHelperTransport: MTPHelperTransport {
             return buffer
         }
 
-        if process.terminationStatus != 0 {
-            throw DeviceFileSystemError.helperFailed(
-                "The Garmin helper exited with status \(process.terminationStatus) before producing a response."
-            )
-        }
         throw DeviceFileSystemError.helperFailed(
             "The Garmin helper exited with status \(process.terminationStatus) before producing a response."
         )
