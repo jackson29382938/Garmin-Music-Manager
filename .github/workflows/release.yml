@@ -1,0 +1,140 @@
+name: Release
+
+# Publishes a GitHub Release when a version tag is pushed (e.g. v0.3.0).
+# Builds the native macOS app bundle plus the cross-platform GarminMusicApp
+# (WinUI / AppKit / Gtk) and attaches them as release assets. The release job
+# runs even if some platform build fails, attaching whatever artifacts exist.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # Cross-platform app — Linux (Gtk 4).
+  linux:
+    runs-on: ubuntu-latest
+    container: swift:6.1.2
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install GTK 4
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libgtk-4-dev pkg-config
+
+      - name: Build (release)
+        working-directory: GarminMusicApp
+        run: swift build -c release
+
+      - name: Package
+        run: |
+          mkdir -p out
+          cp "GarminMusicApp/.build/release/GarminMusicApp" out/GarminMusicApp
+          cp GarminMusicApp/README.md out/README.md
+          tar -czf GarminMusicApp-linux-x86_64.tar.gz -C out .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: GarminMusicApp-linux-x86_64.tar.gz
+          if-no-files-found: error
+
+  # Native macOS app bundle + cross-platform app (AppKit).
+  macos:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install libmtp
+        run: brew install libmtp || true
+
+      - name: Build native macOS app bundle
+        working-directory: "Garmin Music Manager"
+        run: ./Scripts/package-app.sh
+
+      - name: Zip native app bundle
+        working-directory: "Garmin Music Manager"
+        run: ditto -c -k --keepParent "dist/Garmin Music Manager.app" "$GITHUB_WORKSPACE/GarminMusicManager-macOS.zip"
+
+      - name: Build cross-platform app (AppKit, release)
+        working-directory: GarminMusicApp
+        run: swift build -c release
+
+      - name: Zip cross-platform app
+        run: |
+          mkdir -p out
+          cp "GarminMusicApp/.build/release/GarminMusicApp" out/GarminMusicApp
+          ditto -c -k --keepParent out "GarminMusicApp-macOS.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            GarminMusicManager-macOS.zip
+            GarminMusicApp-macOS.zip
+          if-no-files-found: error
+
+  # Cross-platform app — Windows (WinUI).
+  windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Swift toolchain
+        uses: compnerd/gha-setup-swift@main
+        with:
+          branch: swift-6.1.2-release
+          tag: 6.1.2-RELEASE
+
+      - name: Build (release)
+        working-directory: GarminMusicApp
+        run: swift build -c release
+
+      - name: Zip (binary + runtime DLLs)
+        working-directory: GarminMusicApp
+        run: Compress-Archive -Path ".build\release\*" -DestinationPath "$env:GITHUB_WORKSPACE\GarminMusicApp-windows-x86_64.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: GarminMusicApp-windows-x86_64.zip
+          if-no-files-found: error
+
+  release:
+    needs: [linux, macos, windows]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          generate_release_notes: true
+          fail_on_unmatched_files: false
+          name: Garmin Music Manager ${{ github.ref_name }}
+          body: |
+            Garmin Music Manager **${{ github.ref_name }}** — first cross-platform release.
+
+            ### Downloads
+            - **Windows** — `GarminMusicApp-windows-x86_64.zip` (WinUI; unzip and run `GarminMusicApp.exe`).
+            - **macOS** — `GarminMusicManager-macOS.zip` (native SwiftUI app bundle) and `GarminMusicApp-macOS.zip` (cross-platform build).
+            - **Linux** — `GarminMusicApp-linux-x86_64.tar.gz` (Gtk 4; requires the Swift runtime and GTK 4 installed).
+
+            The new cross-platform UI (Windows / macOS / Linux) is built with SwiftCrossUI and shares the `GarminMusicCore` engine with the native macOS app.
+
+            Marked as a pre-release: built from the cross-platform PR branch. Untick "pre-release" to promote it.
+          files: artifacts/**/*
