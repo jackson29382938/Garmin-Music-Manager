@@ -1,0 +1,71 @@
+name: Cross-platform app
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Linux — SwiftCrossUI Gtk backend.
+  linux-app:
+    runs-on: ubuntu-latest
+    container: swift:6.1.2
+    defaults:
+      run:
+        working-directory: GarminMusicApp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install GTK 4
+        working-directory: ${{ github.workspace }}
+        # Do NOT install apt `clang` here — it shadows the Swift toolchain's
+        # clang, which is the one that understands `-index-store-path`.
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends libgtk-4-dev pkg-config
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build (Gtk backend)
+        run: swift build
+
+  # macOS — SwiftCrossUI AppKit backend.
+  macos-app:
+    runs-on: macos-latest
+    defaults:
+      run:
+        working-directory: GarminMusicApp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build (AppKit backend)
+        run: swift build
+
+  # Windows — SwiftCrossUI WinUI backend.
+  windows-app:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: GarminMusicApp
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Swift toolchain
+        uses: compnerd/gha-setup-swift@main
+        with:
+          branch: swift-6.1.2-release
+          tag: 6.1.2-RELEASE
+
+      - name: Show Swift version
+        run: swift --version
+
+      - name: Build (WinUI backend)
+        run: swift build
