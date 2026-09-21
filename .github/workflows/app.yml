@@ -20,9 +20,11 @@ jobs:
 
       - name: Install GTK 4
         working-directory: ${{ github.workspace }}
+        # Do NOT install apt `clang` here — it shadows the Swift toolchain's
+        # clang, which is the one that understands `-index-store-path`.
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends libgtk-4-dev clang pkg-config
+          apt-get install -y --no-install-recommends libgtk-4-dev pkg-config
 
       - name: Show Swift version
         run: swift --version

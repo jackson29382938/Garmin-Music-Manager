@@ -10,7 +10,7 @@ import PackageDescription
 let package = Package(
     name: "GarminMusicApp",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
     ],
     dependencies: [
         .package(url: "https://github.com/stackotter/swift-cross-ui", .upToNextMinor(from: "0.2.0")),
