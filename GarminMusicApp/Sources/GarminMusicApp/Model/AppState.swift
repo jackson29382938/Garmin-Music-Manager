@@ -22,27 +22,27 @@ enum AppTab: String, CaseIterable, Identifiable, Hashable {
 
 /// Observable application state shared across all tabs. Pure Swift + the shared
 /// `GarminMusicCore` engine, so it runs unchanged on Windows, macOS, and Linux.
-final class AppState: ObservableObject {
-    @Published var selectedTab: AppTab? = .library
+final class AppState: SwiftCrossUI.ObservableObject {
+    @SwiftCrossUI.Published var selectedTab: AppTab? = .library
 
-    @Published var sourceFolder: String = ""
-    @Published var destinationFolder: String = ""
-    @Published var playlistName: String = "Garmin Playlist"
+    @SwiftCrossUI.Published var sourceFolder: String = ""
+    @SwiftCrossUI.Published var destinationFolder: String = ""
+    @SwiftCrossUI.Published var playlistName: String = "Garmin Playlist"
 
-    @Published var tracks: [LibraryTrack] = []
-    @Published var selectedIDs: Set<UUID> = []
-    @Published var isScanning = false
+    @SwiftCrossUI.Published var tracks: [LibraryTrack] = []
+    @SwiftCrossUI.Published var selectedIDs: Set<UUID> = []
+    @SwiftCrossUI.Published var isScanning = false
 
-    @Published var organization: OrganizationChoice = .flat
-    @Published var overwrite: OverwriteChoice = .skipIdentical
-    @Published var writePlaylist = true
+    @SwiftCrossUI.Published var organization: OrganizationChoice = .flat
+    @SwiftCrossUI.Published var overwrite: OverwriteChoice = .skipIdentical
+    @SwiftCrossUI.Published var writePlaylist = true
 
-    @Published var isSending = false
-    @Published var progress: Double = 0
+    @SwiftCrossUI.Published var isSending = false
+    @SwiftCrossUI.Published var progress: Double = 0
 
-    @Published var onWatchFiles: [WatchFile] = []
+    @SwiftCrossUI.Published var onWatchFiles: [WatchFile] = []
 
-    @Published var statusMessage = "Add a music folder to get started."
+    @SwiftCrossUI.Published var statusMessage = "Add a music folder to get started."
 
     init() {
         let home = URL(fileURLWithPath: NSHomeDirectory())
