@@ -99,6 +99,28 @@ final class MTPHelperRunner {
                         dependencyStatus: dependencyStatus
                     )
                 }
+            case .createFolder:
+                return try withSession { session in
+                    MTPHelperResponse(
+                        ok: true,
+                        operationResult: try session.createFolderPublic(
+                            path: request.destinationPath,
+                            name: request.playlistName
+                        ),
+                        dependencyStatus: dependencyStatus
+                    )
+                }
+            case .rename:
+                return try withSession { session in
+                    MTPHelperResponse(
+                        ok: true,
+                        operationResult: try session.renameEmulated(
+                            file: request.files.first,
+                            newName: request.playlistName
+                        ),
+                        dependencyStatus: dependencyStatus
+                    )
+                }
             case .move:
                 throw MTPHelperError(
                     code: "unsupported-move",

@@ -555,6 +555,95 @@ final class MTPDirectSession {
         )
     }
 
+    /// Creates a folder at `path` (parent) named `name`.
+    func createFolderPublic(path: String?, name: String?) throws -> DeviceFileOperationResult {
+        try MTPCancelState.throwIfCancelled()
+        let folderName = (name ?? "New Folder").trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanName = folderName.isEmpty ? "New Folder" : sanitizedFileName(folderName, fallback: "New Folder")
+        let parentPath = (path ?? "Music").trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        let fullPath = parentPath.isEmpty ? cleanName : "\(parentPath)/\(cleanName)"
+        var index = try folderIndexCached()
+        _ = try ensureFolderPath(fullPath, in: &index)
+        cachedFolderIndex = index
+        invalidateListingCaches()
+        return DeviceFileOperationResult(
+            completedCount: 1,
+            failedItems: [],
+            message: "Created folder “\(cleanName)” (MTP)."
+        )
+    }
+
+    /// Emulated rename: download → upload under new name → delete original.
+    func renameEmulated(file: DeviceFile?, newName: String?) throws -> DeviceFileOperationResult {
+        try MTPCancelState.throwIfCancelled()
+        guard let file else {
+            throw MTPHelperError(code: "rename-missing", message: "No file was provided to rename.")
+        }
+        let clean = (newName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else {
+            throw MTPHelperError(code: "rename-invalid", message: "New name cannot be empty.")
+        }
+        let safeName = sanitizedFileName(clean, fallback: file.name)
+        let tempDir = fileManager.temporaryDirectory
+            .appendingPathComponent("gmm-rename-\(UUID().uuidString)", isDirectory: true)
+        try fileManager.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: tempDir) }
+
+        let downloadResult = try download([file], to: tempDir.path)
+        guard downloadResult.completedCount > 0 else {
+            return DeviceFileOperationResult(
+                completedCount: 0,
+                failedItems: [file.name],
+                message: "Could not download \(file.name) for rename."
+            )
+        }
+
+        let candidates = try fileManager.contentsOfDirectory(at: tempDir, includingPropertiesForKeys: nil)
+        let downloaded = candidates.first { $0.lastPathComponent == file.name } ?? candidates.first
+        guard let downloaded else {
+            throw MTPHelperError(code: "rename-download-missing", message: "Downloaded file missing for rename.")
+        }
+
+        let uploadSource: URL
+        if downloaded.lastPathComponent == safeName {
+            uploadSource = downloaded
+        } else {
+            let renamedLocal = tempDir.appendingPathComponent(safeName)
+            try fileManager.moveItem(at: downloaded, to: renamedLocal)
+            uploadSource = renamedLocal
+        }
+
+        let parentPath: String = {
+            let path = file.path
+            if let slash = path.lastIndex(of: "/") {
+                return String(path[..<slash])
+            }
+            return "Music"
+        }()
+        let remotePath = parentPath.isEmpty ? safeName : "\(parentPath)/\(safeName)"
+        let upload = DeviceUploadFile(
+            localPath: uploadSource.path,
+            remotePath: remotePath,
+            displayName: safeName
+        )
+        let uploadResult = try self.upload([upload], verifyUploads: true)
+        guard uploadResult.completedCount > 0 else {
+            return DeviceFileOperationResult(
+                completedCount: 0,
+                failedItems: [file.name],
+                message: "Uploaded rename failed for \(file.name)."
+            )
+        }
+
+        let deleteResult = try delete([file])
+        invalidateListingCaches()
+        return DeviceFileOperationResult(
+            completedCount: 1,
+            failedItems: deleteResult.failedItems,
+            message: "Renamed “\(file.name)” to “\(safeName)” (emulated MTP rename)."
+        )
+    }
+
     private enum PlaylistWriteAction {
         case created
         case updated

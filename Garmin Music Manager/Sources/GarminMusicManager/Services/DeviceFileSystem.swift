@@ -26,11 +26,23 @@ protocol DeviceFileSystem {
     func storageInfo() async throws -> DeviceStorageInfo?
     /// Optional: create a native device playlist. Default is unsupported.
     func createPlaylist(name: String, tracks: [DeviceFile]) async throws -> DeviceFileOperationResult
+    /// Create a folder under `parentPath` (Music-relative or storage path).
+    func createFolder(named name: String, parentPath: String) async throws -> DeviceFileOperationResult
+    /// Rename a single device object (may be emulated on MTP).
+    func rename(_ file: DeviceFile, to newName: String) async throws -> DeviceFileOperationResult
 }
 
 extension DeviceFileSystem {
     func createPlaylist(name: String, tracks: [DeviceFile]) async throws -> DeviceFileOperationResult {
         throw DeviceFileSystemError.unsupported("Playlists are only created over MTP.")
+    }
+
+    func createFolder(named name: String, parentPath: String) async throws -> DeviceFileOperationResult {
+        throw DeviceFileSystemError.unsupported("Creating folders is not supported on this destination.")
+    }
+
+    func rename(_ file: DeviceFile, to newName: String) async throws -> DeviceFileOperationResult {
+        throw DeviceFileSystemError.unsupported("Rename is not supported on this destination.")
     }
 }
 
@@ -357,6 +369,31 @@ final class MountedFolderDeviceFileSystem: DeviceFileSystem {
         )
     }
 
+    func createFolder(named name: String, parentPath: String) async throws -> DeviceFileOperationResult {
+        try await Task.detached(priority: .userInitiated) {
+            let parent = self.rootURL.appendingPathComponent(parentPath.trimmingCharacters(in: CharacterSet(charactersIn: "/")))
+            try self.fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+            let folder = try LocalFileOperations.createFolder(named: name, in: parent)
+            return DeviceFileOperationResult(
+                completedCount: 1,
+                failedItems: [],
+                message: "Created folder “\(folder.lastPathComponent)”."
+            )
+        }.value
+    }
+
+    func rename(_ file: DeviceFile, to newName: String) async throws -> DeviceFileOperationResult {
+        try await Task.detached(priority: .userInitiated) {
+            let source = self.url(for: file)
+            let (dest, _) = try LocalFileOperations.rename(source, to: newName)
+            return DeviceFileOperationResult(
+                completedCount: 1,
+                failedItems: [],
+                message: "Renamed to “\(dest.lastPathComponent)”."
+            )
+        }.value
+    }
+
     private func listFiles(includeAllFiles: Bool) throws -> [DeviceFile] {
         guard let enumerator = fileManager.enumerator(
             at: rootURL,
@@ -558,6 +595,26 @@ final class MTPDeviceFileSystem: DeviceFileSystem {
                 files: tracks,
                 playlistName: name,
                 updateExistingPlaylist: MTPHelperClient.sharedUpdateExistingPlaylist
+            )
+        )
+    }
+
+    func createFolder(named name: String, parentPath: String) async throws -> DeviceFileOperationResult {
+        try await helperClient.operationResult(
+            request: MTPHelperRequest(
+                operation: .createFolder,
+                destinationPath: parentPath,
+                playlistName: name
+            )
+        )
+    }
+
+    func rename(_ file: DeviceFile, to newName: String) async throws -> DeviceFileOperationResult {
+        try await helperClient.operationResult(
+            request: MTPHelperRequest(
+                operation: .rename,
+                files: [file],
+                playlistName: newName
             )
         )
     }
@@ -874,6 +931,18 @@ final class MTPHelperClient {
             raw = 240
         case .createPlaylist:
             raw = 90
+        case .createFolder:
+            raw = 90
+        case .rename:
+            let bytes = request.files.reduce(Int64(0)) { $0 + max($1.size, 0) }
+            raw = Self.scaledTimeout(
+                base: 90,
+                itemCount: max(1, request.files.count),
+                bytes: bytes,
+                secondsPerItem: 20,
+                secondsPerMiB: 2.5,
+                maximum: 3_600
+            )
         }
         return raw * scale
     }

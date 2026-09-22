@@ -21,6 +21,13 @@ final class FakeDeviceFileSystem: DeviceFileSystem, @unchecked Sendable {
     private(set) var listMusicCallCount = 0
     private(set) var createPlaylistCallCount = 0
     private(set) var lastPlaylistName: String?
+    private(set) var createFolderCallCount = 0
+    private(set) var lastCreatedFolderName: String?
+    private(set) var lastCreatedFolderParent: String?
+    private(set) var renameCallCount = 0
+    private(set) var lastRenameNewName: String?
+    var createFolderResults: [Result<DeviceFileOperationResult, Error>] = []
+    var renameResults: [Result<DeviceFileOperationResult, Error>] = []
 
     /// Progress events emitted once per upload call (before returning the result).
     var progressEventsPerUpload: [MTPProgressEvent] = []
@@ -106,6 +113,33 @@ final class FakeDeviceFileSystem: DeviceFileSystem, @unchecked Sendable {
 
     func storageInfo() async throws -> DeviceStorageInfo? {
         listMusicSnapshot.storageInfo
+    }
+
+    func createFolder(named name: String, parentPath: String) async throws -> DeviceFileOperationResult {
+        createFolderCallCount += 1
+        lastCreatedFolderName = name
+        lastCreatedFolderParent = parentPath
+        if !createFolderResults.isEmpty {
+            return try createFolderResults.removeFirst().get()
+        }
+        return DeviceFileOperationResult(
+            completedCount: 1,
+            failedItems: [],
+            message: "Created folder “\(name)”."
+        )
+    }
+
+    func rename(_ file: DeviceFile, to newName: String) async throws -> DeviceFileOperationResult {
+        renameCallCount += 1
+        lastRenameNewName = newName
+        if !renameResults.isEmpty {
+            return try renameResults.removeFirst().get()
+        }
+        return DeviceFileOperationResult(
+            completedCount: 1,
+            failedItems: [],
+            message: "Renamed “\(file.name)” to “\(newName)”."
+        )
     }
 
     func createPlaylist(name: String, tracks: [DeviceFile]) async throws -> DeviceFileOperationResult {

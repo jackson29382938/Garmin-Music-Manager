@@ -29,6 +29,8 @@ final class SettingsStore {
         static let compressLargeFiles = "performance.compressLargeFiles"
         static let convertLargeFilesOverMB = "performance.convertLargeFilesOverMB"
         static let includePlaylistContentsWhenBrowsing = "performance.includePlaylistContentsWhenBrowsing"
+        /// One-time bump: playlists are on by default (M3U is the primary Garmin playlist source).
+        static let includePlaylistContentsDefaultOnMigrated = "performance.includePlaylistContentsDefaultOnMigrated"
         static let verifyUploads = "performance.verifyUploads"
         static let librarySettingsJSON = "librarySettings.v1"
         static let conversionSettingsJSON = "conversionSettings.v1"
@@ -37,6 +39,14 @@ final class SettingsStore {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        migratePlaylistContentsDefaultOnIfNeeded()
+    }
+
+    /// Older builds defaulted playlist body loading off; adopt the new on-by-default once.
+    private func migratePlaylistContentsDefaultOnIfNeeded() {
+        guard defaults.object(forKey: Keys.includePlaylistContentsDefaultOnMigrated) == nil else { return }
+        defaults.set(true, forKey: Keys.includePlaylistContentsWhenBrowsing)
+        defaults.set(true, forKey: Keys.includePlaylistContentsDefaultOnMigrated)
     }
 
     var lastDestinationPath: String? {

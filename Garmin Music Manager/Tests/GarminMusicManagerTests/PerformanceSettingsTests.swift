@@ -17,7 +17,7 @@ final class PerformanceSettingsTests: XCTestCase {
         XCTAssertEqual(settings.mtpRetryBackoffSeconds, 0.8, accuracy: 0.001)
         XCTAssertEqual(settings.operationTimeoutScale, 1.0, accuracy: 0.001)
         XCTAssertFalse(settings.compressLargeFiles)
-        XCTAssertFalse(settings.includePlaylistContentsWhenBrowsing)
+        XCTAssertTrue(settings.includePlaylistContentsWhenBrowsing)
         XCTAssertTrue(settings.verifyUploads)
         XCTAssertEqual(settings.matchedPreset, .balanced)
     }
@@ -71,7 +71,7 @@ final class PerformanceSettingsTests: XCTestCase {
         let store = SettingsStore(defaults: defaults)
 
         var custom = PerformanceSettings.template(for: .reliable)
-        custom.includePlaylistContentsWhenBrowsing = true
+        custom.includePlaylistContentsWhenBrowsing = false
         custom.operationTimeoutScale = 2.0
         store.performanceSettings = custom
 
@@ -79,7 +79,7 @@ final class PerformanceSettingsTests: XCTestCase {
         XCTAssertTrue(loaded.forceRefreshBeforeSync)
         XCTAssertEqual(loaded.uploadBatchSize, 1)
         XCTAssertEqual(loaded.mtpRetryAttempts, 5)
-        XCTAssertTrue(loaded.includePlaylistContentsWhenBrowsing)
+        XCTAssertFalse(loaded.includePlaylistContentsWhenBrowsing)
         XCTAssertEqual(loaded.operationTimeoutScale, 2.0, accuracy: 0.001)
         XCTAssertEqual(loaded.matchedPreset, .custom) // includePlaylistContents differs from reliable
     }

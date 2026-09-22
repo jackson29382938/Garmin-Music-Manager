@@ -12,6 +12,10 @@ public enum MTPHelperOperation: String, Codable, Hashable {
     case storageInfo
     /// Create a native MTP playlist from track object IDs (`files[].objectID`).
     case createPlaylist
+    /// Create a folder at `destinationPath` (Music-relative or storage path).
+    case createFolder
+    /// Rename a single object (`files[0]`) to `playlistName` used as the new display name.
+    case rename
 }
 
 public struct MTPHelperRequest: Codable, Hashable {

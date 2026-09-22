@@ -64,10 +64,14 @@ struct DeviceContentsToolbar: View {
                 HStack(spacing: 8) {
                     addToGarminButton
                     createPlaylistButton
+                    newFolderButton
                     deleteButton
                     Menu {
                         copyToMacButton
                         moveButton
+                        renameButton
+                        getInfoButton
+                        quickLookButton
                     } label: {
                         Label("Manage", systemImage: "ellipsis.circle")
                     }
@@ -81,6 +85,7 @@ struct DeviceContentsToolbar: View {
                         copyToMacButton
                         addToGarminButton
                         createPlaylistButton
+                        newFolderButton
                         moveButton
                         deleteButton
                     }
@@ -90,7 +95,11 @@ struct DeviceContentsToolbar: View {
                         copyToMacButton
                         addToGarminButton
                         createPlaylistButton
+                        newFolderButton
                         moveButton
+                        renameButton
+                        getInfoButton
+                        quickLookButton
                         deleteButton
                     } label: {
                         Label("Actions", systemImage: "ellipsis.circle")
@@ -156,5 +165,47 @@ struct DeviceContentsToolbar: View {
         }
         .disabled(browser.selectedFileIDs.isEmpty || model.isManagingDeviceFiles)
         .help("Delete selected Garmin files")
+    }
+
+    private var newFolderButton: some View {
+        Button {
+            model.fileManagerController.focusedPane = .garmin
+            model.fileManagerController.beginNewFolder()
+        } label: {
+            Label("New Folder", systemImage: "folder.badge.plus")
+        }
+        .disabled(!browser.isConfigured || model.isManagingDeviceFiles)
+        .help("Create a folder on the watch (MTP)")
+    }
+
+    private var renameButton: some View {
+        Button {
+            guard let file = browser.selectedFiles.first else { return }
+            model.fileManagerController.focusedPane = .garmin
+            model.fileManagerController.beginRename(id: file.id, currentName: file.name)
+        } label: {
+            Label("Rename…", systemImage: "pencil")
+        }
+        .disabled(browser.selectedFileIDs.count != 1 || model.isManagingDeviceFiles)
+    }
+
+    private var getInfoButton: some View {
+        Button {
+            guard let file = browser.selectedFiles.first else { return }
+            model.fileManagerController.focusedPane = .garmin
+            model.fileManagerController.presentProperties(FilePropertiesModel.device(file))
+        } label: {
+            Label("Get Info", systemImage: "info.circle")
+        }
+        .disabled(browser.selectedFileIDs.count != 1)
+    }
+
+    private var quickLookButton: some View {
+        Button {
+            model.quickLookSelectedDeviceFiles()
+        } label: {
+            Label("Quick Look", systemImage: "eye")
+        }
+        .disabled(browser.selectedFileIDs.isEmpty || model.isManagingDeviceFiles)
     }
 }

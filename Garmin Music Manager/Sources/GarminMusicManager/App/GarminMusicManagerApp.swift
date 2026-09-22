@@ -75,6 +75,106 @@ struct GarminMusicManagerApp: App {
                 .keyboardShortcut(".", modifiers: [.command])
                 .disabled(!appModel.isSyncing && !appModel.isManagingDeviceFiles && !appModel.isBrowsingDevice)
             }
+
+            CommandMenu("File Manager") {
+                Button("New Folder") {
+                    appModel.fileManagerController.beginNewFolder()
+                }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+
+                Button("Rename…") {
+                    if appModel.fileManagerController.focusedPane == .garmin,
+                       let file = appModel.deviceBrowser.selectedFiles.first {
+                        appModel.fileManagerController.beginRename(id: file.id, currentName: file.name)
+                    } else {
+                        appModel.fileManagerController.showRenameSheet = true
+                    }
+                }
+                .keyboardShortcut("\r", modifiers: [])
+
+                Button("Move to Trash / Delete…") {
+                    if appModel.fileManagerController.focusedPane == .garmin {
+                        appModel.requestDeleteSelectedDeviceFiles()
+                    }
+                }
+                .keyboardShortcut(.delete, modifiers: [.command])
+
+                Button("Duplicate") {}
+                    .keyboardShortcut("d", modifiers: [.command])
+
+                Divider()
+
+                Button("Select All") {
+                    if appModel.fileManagerController.focusedPane == .garmin {
+                        appModel.deviceBrowser.selectedFileIDs = Set(appModel.deviceBrowser.displayedFiles.map(\.id))
+                    }
+                }
+                .keyboardShortcut("a", modifiers: [.command])
+
+                Button("Copy") {
+                    let pane = appModel.fileManagerController.focusedPane
+                    if pane == .garmin {
+                        let files = appModel.deviceBrowser.selectedFiles
+                        appModel.fileManagerCopySelection(
+                            from: .garmin,
+                            localURLs: [],
+                            names: files.map(\.name),
+                            deviceIDs: files.map(\.id)
+                        )
+                    }
+                }
+                .keyboardShortcut("c", modifiers: [.command])
+
+                Button("Cut") {
+                    let pane = appModel.fileManagerController.focusedPane
+                    if pane == .garmin {
+                        let files = appModel.deviceBrowser.selectedFiles
+                        appModel.fileManagerCutSelection(
+                            from: .garmin,
+                            localURLs: [],
+                            names: files.map(\.name),
+                            deviceIDs: files.map(\.id)
+                        )
+                    }
+                }
+                .keyboardShortcut("x", modifiers: [.command])
+
+                Button("Paste") {
+                    let pane = appModel.fileManagerController.focusedPane
+                    appModel.fileManagerPaste(into: pane, localFolder: nil)
+                }
+                .keyboardShortcut("v", modifiers: [.command])
+
+                Divider()
+
+                Button("Get Info") {
+                    if appModel.fileManagerController.focusedPane == .garmin,
+                       let file = appModel.deviceBrowser.selectedFiles.first {
+                        appModel.fileManagerController.presentProperties(FilePropertiesModel.device(file))
+                    }
+                }
+                .keyboardShortcut("i", modifiers: [.command])
+
+                Button("Quick Look") {
+                    if appModel.fileManagerController.focusedPane == .garmin {
+                        appModel.quickLookSelectedDeviceFiles()
+                    }
+                }
+                .keyboardShortcut("y", modifiers: [.command])
+
+                Button("Refresh") {
+                    appModel.refreshDeviceContents()
+                }
+                .keyboardShortcut("r", modifiers: [.command, .shift])
+
+                Button("Undo") {
+                    if let action = appModel.fileManagerController.popUndo() {
+                        try? LocalFileOperations.undo(action)
+                    }
+                }
+                .keyboardShortcut("z", modifiers: [.command])
+                .disabled(!appModel.fileManagerController.canUndo)
+            }
         }
         .defaultSize(width: 1180, height: 780)
 

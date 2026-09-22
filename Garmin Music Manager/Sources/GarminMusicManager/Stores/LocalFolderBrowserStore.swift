@@ -30,6 +30,13 @@ struct LocalFolderEntry: Identifiable, Hashable {
     var isDirectory: Bool { kind == .folder }
 }
 
+struct LocalPlace: Identifiable, Hashable {
+    var id: String { url.path }
+    let title: String
+    let url: URL
+    let systemImage: String
+}
+
 /// Finder-style browser over a user-selected Mac folder for File Manager.
 @MainActor
 final class LocalFolderBrowserStore: ObservableObject {
@@ -39,6 +46,12 @@ final class LocalFolderBrowserStore: ObservableObject {
     @Published var selectedIDs: Set<String> = []
     @Published private(set) var lastError: String?
     @Published private(set) var isRefreshing = false
+    @Published var showHiddenFiles = false
+    @Published var recursiveSearch = false
+    @Published var sort: LocalFileSort = .name
+    @Published var viewMode: LocalViewMode = .list
+    @Published var pathDraft = ""
+    @Published var favoritePaths: [String] = []
 
     private let fileManager = FileManager.default
 
@@ -49,23 +62,21 @@ final class LocalFolderBrowserStore: ObservableObject {
     init(folder: URL? = nil) {
         let resolved = Self.resolveInitialFolder(folder)
         currentFolder = resolved
+        pathDraft = resolved.path
         refresh()
     }
 
     var displayedEntries: [LocalFolderEntry] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        let filtered: [LocalFolderEntry]
+        var filtered: [LocalFolderEntry]
         if query.isEmpty {
             filtered = entries
+        } else if recursiveSearch {
+            filtered = recursiveSearchEntries(matching: query)
         } else {
             filtered = entries.filter { $0.name.localizedCaseInsensitiveContains(query) }
         }
-        return filtered.sorted { lhs, rhs in
-            if lhs.isDirectory != rhs.isDirectory {
-                return lhs.isDirectory && !rhs.isDirectory
-            }
-            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-        }
+        return sortEntries(filtered)
     }
 
     var selectedEntries: [LocalFolderEntry] {
@@ -89,19 +100,56 @@ final class LocalFolderBrowserStore: ObservableObject {
         currentFolder.path
     }
 
+    var standardPlaces: [LocalPlace] {
+        let home = URL(fileURLWithPath: NSHomeDirectory())
+        var places: [LocalPlace] = [
+            LocalPlace(title: "Music", url: Self.defaultMusicFolder, systemImage: "music.note"),
+            LocalPlace(title: "Home", url: home, systemImage: "house"),
+        ]
+        if let desktop = Self.fileManagerURL(for: .desktopDirectory) {
+            places.append(LocalPlace(title: "Desktop", url: desktop, systemImage: "desktopcomputer"))
+        }
+        if let downloads = Self.fileManagerURL(for: .downloadsDirectory) {
+            places.append(LocalPlace(title: "Downloads", url: downloads, systemImage: "arrow.down.circle"))
+        }
+        if let documents = Self.fileManagerURL(for: .documentDirectory) {
+            places.append(LocalPlace(title: "Documents", url: documents, systemImage: "doc"))
+        }
+        for path in favoritePaths {
+            let url = URL(fileURLWithPath: path)
+            places.append(LocalPlace(title: url.lastPathComponent, url: url, systemImage: "star.fill"))
+        }
+        return places
+    }
+
+    func applySettings(_ settings: LibrarySettings) {
+        showHiddenFiles = settings.fileManagerShowHiddenFiles
+        recursiveSearch = settings.fileManagerRecursiveSearch
+        favoritePaths = settings.fileManagerFavoritePaths
+        if let mode = LocalViewMode(rawValue: settings.fileManagerViewMode) {
+            viewMode = mode
+        }
+        refresh()
+    }
+
     func refresh() {
         isRefreshing = true
         defer { isRefreshing = false }
         lastError = nil
         selectedIDs.removeAll()
+        pathDraft = currentFolder.path
 
         do {
+            var options: FileManager.DirectoryEnumerationOptions = [.skipsPackageDescendants]
+            if !showHiddenFiles {
+                options.insert(.skipsHiddenFiles)
+            }
             let urls = try fileManager.contentsOfDirectory(
                 at: currentFolder,
                 includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .isHiddenKey],
-                options: [.skipsHiddenFiles]
+                options: options
             )
-            entries = urls.compactMap(makeEntry(from:))
+            entries = urls.compactMap { makeEntry(from: $0, allowHidden: showHiddenFiles) }
         } catch {
             entries = []
             lastError = error.localizedDescription
@@ -116,6 +164,7 @@ final class LocalFolderBrowserStore: ObservableObject {
             return
         }
         currentFolder = folder.standardizedFileURL
+        pathDraft = currentFolder.path
         searchText = ""
         refresh()
     }
@@ -125,11 +174,17 @@ final class LocalFolderBrowserStore: ObservableObject {
         navigate(to: currentFolder.deletingLastPathComponent())
     }
 
+    func navigateToPathDraft() {
+        let trimmed = pathDraft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        navigate(to: URL(fileURLWithPath: trimmed))
+    }
+
     func open(_ entry: LocalFolderEntry) {
         if entry.isDirectory {
             navigate(to: entry.url)
         } else {
-            NSWorkspace.shared.activateFileViewerSelecting([entry.url])
+            QuickLookPresenter.preview(urls: [entry.url])
         }
     }
 
@@ -163,6 +218,103 @@ final class LocalFolderBrowserStore: ObservableObject {
         selectedIDs.removeAll()
     }
 
+    func toggleFavoriteCurrentFolder() {
+        let path = currentFolder.path
+        if let idx = favoritePaths.firstIndex(of: path) {
+            favoritePaths.remove(at: idx)
+        } else {
+            favoritePaths.append(path)
+        }
+    }
+
+    func isFavorite(_ url: URL) -> Bool {
+        favoritePaths.contains(url.path)
+    }
+
+    @discardableResult
+    func createFolder(named name: String) -> URL? {
+        do {
+            let url = try LocalFileOperations.createFolder(named: name, in: currentFolder)
+            refresh()
+            selectedIDs = [url.path]
+            return url
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    func renameSelected(to newName: String) -> LocalUndoAction? {
+        guard let entry = selectedEntries.first else { return nil }
+        do {
+            let (_, undo) = try LocalFileOperations.rename(entry.url, to: newName)
+            refresh()
+            return undo
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    func trashSelected() -> LocalUndoAction? {
+        let urls = selectedEntries.map(\.url)
+        guard !urls.isEmpty else { return nil }
+        do {
+            let result = try LocalFileOperations.trash(urls)
+            refresh()
+            return result.undo
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    func duplicateSelected() -> Bool {
+        let urls = selectedEntries.map(\.url)
+        guard !urls.isEmpty else { return false }
+        do {
+            _ = try LocalFileOperations.duplicate(urls)
+            refresh()
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
+    @discardableResult
+    func compressSelected() -> URL? {
+        let urls = selectedEntries.map(\.url)
+        guard !urls.isEmpty else { return nil }
+        do {
+            let zip = try LocalFileOperations.compress(urls, into: currentFolder)
+            refresh()
+            return zip
+        } catch {
+            lastError = error.localizedDescription
+            return nil
+        }
+    }
+
+    @discardableResult
+    func decompressSelected() -> Bool {
+        let zips = selectedEntries.filter { $0.url.pathExtension.lowercased() == "zip" }.map(\.url)
+        guard !zips.isEmpty else { return false }
+        do {
+            for zip in zips {
+                try LocalFileOperations.decompress(zip, into: currentFolder)
+            }
+            refresh()
+            return true
+        } catch {
+            lastError = error.localizedDescription
+            return false
+        }
+    }
+
     // MARK: - Private
 
     private static func resolveInitialFolder(_ folder: URL?) -> URL {
@@ -182,7 +334,50 @@ final class LocalFolderBrowserStore: ObservableObject {
         FileManager.default.urls(for: directory, in: .userDomainMask).first
     }
 
-    private func makeEntry(from url: URL) -> LocalFolderEntry? {
+    private func sortEntries(_ entries: [LocalFolderEntry]) -> [LocalFolderEntry] {
+        entries.sorted { lhs, rhs in
+            if lhs.isDirectory != rhs.isDirectory {
+                return lhs.isDirectory && !rhs.isDirectory
+            }
+            switch sort {
+            case .name:
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            case .size:
+                if lhs.size != rhs.size { return lhs.size < rhs.size }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            case .date:
+                let ld = lhs.modifiedDate ?? .distantPast
+                let rd = rhs.modifiedDate ?? .distantPast
+                if ld != rd { return ld > rd }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            case .kind:
+                if lhs.kind != rhs.kind {
+                    return lhs.kind.rawValue.localizedStandardCompare(rhs.kind.rawValue) == .orderedAscending
+                }
+                return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
+            }
+        }
+    }
+
+    private func recursiveSearchEntries(matching query: String) -> [LocalFolderEntry] {
+        var results: [LocalFolderEntry] = []
+        guard let enumerator = fileManager.enumerator(
+            at: currentFolder,
+            includingPropertiesForKeys: [.isDirectoryKey, .fileSizeKey, .contentModificationDateKey, .isHiddenKey],
+            options: showHiddenFiles ? [.skipsPackageDescendants] : [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else {
+            return entries.filter { $0.name.localizedCaseInsensitiveContains(query) }
+        }
+        for case let url as URL in enumerator {
+            guard let entry = makeEntry(from: url, allowHidden: showHiddenFiles),
+                  entry.name.localizedCaseInsensitiveContains(query) else { continue }
+            results.append(entry)
+            if results.count >= 500 { break }
+        }
+        return results
+    }
+
+    private func makeEntry(from url: URL, allowHidden: Bool) -> LocalFolderEntry? {
         let values = try? url.resourceValues(forKeys: [
             .isDirectoryKey,
             .fileSizeKey,
@@ -190,7 +385,7 @@ final class LocalFolderBrowserStore: ObservableObject {
             .isHiddenKey,
             .nameKey
         ])
-        if values?.isHidden == true { return nil }
+        if !allowHidden, values?.isHidden == true { return nil }
 
         let isDirectory = values?.isDirectory == true
         let ext = url.pathExtension.lowercased()

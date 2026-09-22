@@ -71,7 +71,7 @@ struct PerformanceSettings: Codable, Equatable {
     var compressLargeFiles: Bool
     /// Threshold in mebibytes; used only when `compressLargeFiles` is true. `0` treated as off.
     var convertLargeFilesOverMB: Int
-    /// Download on-device playlist bodies when listing music (expensive on some watches).
+    /// Download on-device playlist bodies when listing music (needed to show Garmin .m3u/.m3u8 playlists).
     var includePlaylistContentsWhenBrowsing: Bool
     /// When false, helper skips post-upload size verification (faster, less safe).
     var verifyUploads: Bool
@@ -106,7 +106,7 @@ struct PerformanceSettings: Codable, Equatable {
                 operationTimeoutScale: 1.0,
                 compressLargeFiles: false,
                 convertLargeFilesOverMB: 0,
-                includePlaylistContentsWhenBrowsing: false,
+                includePlaylistContentsWhenBrowsing: true,
                 verifyUploads: true
             )
         case .fast:
@@ -123,7 +123,7 @@ struct PerformanceSettings: Codable, Equatable {
                 operationTimeoutScale: 0.75,
                 compressLargeFiles: false,
                 convertLargeFilesOverMB: 0,
-                includePlaylistContentsWhenBrowsing: false,
+                includePlaylistContentsWhenBrowsing: true,
                 verifyUploads: false
             )
         case .reliable:
@@ -140,7 +140,7 @@ struct PerformanceSettings: Codable, Equatable {
                 operationTimeoutScale: 1.5,
                 compressLargeFiles: false,
                 convertLargeFilesOverMB: 0,
-                includePlaylistContentsWhenBrowsing: false,
+                includePlaylistContentsWhenBrowsing: true,
                 verifyUploads: true
             )
         case .expressFriendly:
@@ -157,7 +157,7 @@ struct PerformanceSettings: Codable, Equatable {
                 operationTimeoutScale: 1.0,
                 compressLargeFiles: false,
                 convertLargeFilesOverMB: 0,
-                includePlaylistContentsWhenBrowsing: false,
+                includePlaylistContentsWhenBrowsing: true,
                 verifyUploads: true
             )
         case .smallFiles:
@@ -174,7 +174,7 @@ struct PerformanceSettings: Codable, Equatable {
                 operationTimeoutScale: 1.0,
                 compressLargeFiles: true,
                 convertLargeFilesOverMB: 50,
-                includePlaylistContentsWhenBrowsing: false,
+                includePlaylistContentsWhenBrowsing: true,
                 verifyUploads: true
             )
         }

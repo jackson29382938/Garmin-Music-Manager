@@ -88,6 +88,18 @@ struct LibrarySettings: Codable, Equatable {
     var fileManagerMacMode: String
     /// Last browsed Mac folder path in File Manager (Folders mode).
     var fileManagerLastFolderPath: String?
+    /// Persisted Places favorites (absolute paths).
+    var fileManagerFavoritePaths: [String]
+    /// Last open Mac folder tab paths.
+    var fileManagerMacTabPaths: [String]
+    /// Show hidden files in Mac folder browser.
+    var fileManagerShowHiddenFiles: Bool
+    /// `list` or `icons`.
+    var fileManagerViewMode: String
+    /// Recursive search default in Mac pane.
+    var fileManagerRecursiveSearch: Bool
+    /// Show a notice when Watch ops use MTP emulation.
+    var notifyOnMTPEmulation: Bool
 
     static let durationToleranceRange: ClosedRange<Double> = 0.5...5.0
     static let importConcurrencyRange: ClosedRange<Int> = 0...32
@@ -108,7 +120,13 @@ struct LibrarySettings: Codable, Equatable {
         rememberLastAppMode: true,
         lastAppMode: AppMode.transfer.rawValue,
         fileManagerMacMode: FileManagerMacMode.folders.rawValue,
-        fileManagerLastFolderPath: nil
+        fileManagerLastFolderPath: nil,
+        fileManagerFavoritePaths: [],
+        fileManagerMacTabPaths: [],
+        fileManagerShowHiddenFiles: false,
+        fileManagerViewMode: LocalViewMode.list.rawValue,
+        fileManagerRecursiveSearch: false,
+        notifyOnMTPEmulation: true
     )
 
     enum CodingKeys: String, CodingKey {
@@ -127,6 +145,12 @@ struct LibrarySettings: Codable, Equatable {
         case lastAppMode
         case fileManagerMacMode
         case fileManagerLastFolderPath
+        case fileManagerFavoritePaths
+        case fileManagerMacTabPaths
+        case fileManagerShowHiddenFiles
+        case fileManagerViewMode
+        case fileManagerRecursiveSearch
+        case notifyOnMTPEmulation
     }
 
     init(
@@ -144,7 +168,13 @@ struct LibrarySettings: Codable, Equatable {
         rememberLastAppMode: Bool,
         lastAppMode: String,
         fileManagerMacMode: String = FileManagerMacMode.folders.rawValue,
-        fileManagerLastFolderPath: String? = nil
+        fileManagerLastFolderPath: String? = nil,
+        fileManagerFavoritePaths: [String] = [],
+        fileManagerMacTabPaths: [String] = [],
+        fileManagerShowHiddenFiles: Bool = false,
+        fileManagerViewMode: String = LocalViewMode.list.rawValue,
+        fileManagerRecursiveSearch: Bool = false,
+        notifyOnMTPEmulation: Bool = true
     ) {
         self.restoreQueueOnLaunch = restoreQueueOnLaunch
         self.importSelectionMode = importSelectionMode
@@ -161,6 +191,12 @@ struct LibrarySettings: Codable, Equatable {
         self.lastAppMode = lastAppMode
         self.fileManagerMacMode = fileManagerMacMode
         self.fileManagerLastFolderPath = fileManagerLastFolderPath
+        self.fileManagerFavoritePaths = fileManagerFavoritePaths
+        self.fileManagerMacTabPaths = fileManagerMacTabPaths
+        self.fileManagerShowHiddenFiles = fileManagerShowHiddenFiles
+        self.fileManagerViewMode = fileManagerViewMode
+        self.fileManagerRecursiveSearch = fileManagerRecursiveSearch
+        self.notifyOnMTPEmulation = notifyOnMTPEmulation
     }
 
     init(from decoder: Decoder) throws {
@@ -193,6 +229,18 @@ struct LibrarySettings: Codable, Equatable {
         fileManagerMacMode = try container.decodeIfPresent(String.self, forKey: .fileManagerMacMode)
             ?? defaults.fileManagerMacMode
         fileManagerLastFolderPath = try container.decodeIfPresent(String.self, forKey: .fileManagerLastFolderPath)
+        fileManagerFavoritePaths = try container.decodeIfPresent([String].self, forKey: .fileManagerFavoritePaths)
+            ?? defaults.fileManagerFavoritePaths
+        fileManagerMacTabPaths = try container.decodeIfPresent([String].self, forKey: .fileManagerMacTabPaths)
+            ?? defaults.fileManagerMacTabPaths
+        fileManagerShowHiddenFiles = try container.decodeIfPresent(Bool.self, forKey: .fileManagerShowHiddenFiles)
+            ?? defaults.fileManagerShowHiddenFiles
+        fileManagerViewMode = try container.decodeIfPresent(String.self, forKey: .fileManagerViewMode)
+            ?? defaults.fileManagerViewMode
+        fileManagerRecursiveSearch = try container.decodeIfPresent(Bool.self, forKey: .fileManagerRecursiveSearch)
+            ?? defaults.fileManagerRecursiveSearch
+        notifyOnMTPEmulation = try container.decodeIfPresent(Bool.self, forKey: .notifyOnMTPEmulation)
+            ?? defaults.notifyOnMTPEmulation
     }
 
     func encode(to encoder: Encoder) throws {
@@ -212,6 +260,12 @@ struct LibrarySettings: Codable, Equatable {
         try container.encode(lastAppMode, forKey: .lastAppMode)
         try container.encode(fileManagerMacMode, forKey: .fileManagerMacMode)
         try container.encodeIfPresent(fileManagerLastFolderPath, forKey: .fileManagerLastFolderPath)
+        try container.encode(fileManagerFavoritePaths, forKey: .fileManagerFavoritePaths)
+        try container.encode(fileManagerMacTabPaths, forKey: .fileManagerMacTabPaths)
+        try container.encode(fileManagerShowHiddenFiles, forKey: .fileManagerShowHiddenFiles)
+        try container.encode(fileManagerViewMode, forKey: .fileManagerViewMode)
+        try container.encode(fileManagerRecursiveSearch, forKey: .fileManagerRecursiveSearch)
+        try container.encode(notifyOnMTPEmulation, forKey: .notifyOnMTPEmulation)
     }
 
     mutating func clamp() {

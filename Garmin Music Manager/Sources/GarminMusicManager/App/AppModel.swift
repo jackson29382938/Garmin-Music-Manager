@@ -106,6 +106,16 @@ final class AppModel: ObservableObject {
     /// Track IDs from the last MTP transfer that failed (for Retry Failed).
     @Published private(set) var lastFailedTrackIDs: Set<UUID> = []
 
+    /// Shared File Manager / On Watch drag-and-drop session.
+    let dragDropSession = DragDropSession()
+    /// Shared File Manager command hub (clipboard, focus, undo, sync confirms).
+    let fileManagerController = FileManagerController()
+    /// Device file IDs to delete after a confirmed transfer-move download completes.
+    @Published var pendingDragMoveDeleteIDs: [String] = []
+    @Published var showDragMoveDeleteConfirmation = false
+
+    private lazy var dragDropCoordinator: DragDropCoordinator = makeDragDropCoordinator()
+
     private let detector = DeviceDetector()
     private let syncSession = SyncSessionController()
     private let deviceSession = DeviceSessionController()
@@ -114,6 +124,7 @@ final class AppModel: ObservableObject {
     private let transferLogStore = TransferLogStore()
     private let settingsStore: SettingsStore
     private var deviceBrowserCancellable: AnyCancellable?
+    private var fileManagerCancellable: AnyCancellable?
     private var transferLogCancellable: AnyCancellable?
     private var tracksPersistCancellable: AnyCancellable?
     private var connectMonitor: DeviceConnectMonitor?
@@ -153,6 +164,14 @@ final class AppModel: ObservableObject {
         self.deviceBrowser.listingReuseTTL = performanceSettings.listingReuseSeconds
         self.deviceBrowser.sortOrder = librarySettings.defaultDeviceSort
         self.deviceBrowserCancellable = deviceBrowser.objectWillChange.sink { [weak self] _ in
+            self?.objectWillChange.send()
+        }
+        self.fileManagerCancellable = Publishers.MergeMany(
+            fileManagerController.objectWillChange,
+            fileManagerController.clipboard.objectWillChange,
+            fileManagerController.macTabs.objectWillChange
+        )
+        .sink { [weak self] _ in
             self?.objectWillChange.send()
         }
         self.transferLogCancellable = transferLogStore.objectWillChange.sink { [weak self] _ in
@@ -1117,6 +1136,328 @@ final class AppModel: ObservableObject {
         )
     }
 
+    // MARK: - Drag and drop
+
+    var dragCoordinator: DragDropCoordinator { dragDropCoordinator }
+
+    func handleUnifiedDrop(
+        items: DragItemSet,
+        destination: DropDestination,
+        destinationLabel: String,
+        sourceLabel: String
+    ) {
+        _ = dragDropCoordinator.handleDrop(
+            items: items,
+            destination: destination,
+            destinationLabel: destinationLabel,
+            sourceLabel: sourceLabel,
+            session: dragDropSession
+        )
+    }
+
+    func confirmPendingDrop() {
+        guard let pending = dragDropSession.pendingConfirm else { return }
+        dragDropCoordinator.confirmPending(pending, session: dragDropSession)
+    }
+
+    func cancelPendingDrop() {
+        dragDropCoordinator.cancelPending(session: dragDropSession)
+    }
+
+    func confirmDragMoveDeleteFromWatch() {
+        let ids = pendingDragMoveDeleteIDs
+        pendingDragMoveDeleteIDs = []
+        showDragMoveDeleteConfirmation = false
+        guard !ids.isEmpty else { return }
+        deviceBrowser.selectedFileIDs = Set(ids)
+        deleteSelectedDeviceFiles()
+    }
+
+    func cancelDragMoveDeleteFromWatch() {
+        pendingDragMoveDeleteIDs = []
+        showDragMoveDeleteConfirmation = false
+    }
+
+    // MARK: - File Manager commands
+
+    func fileManagerCopySelection(from pane: FileManagerPane, localURLs: [URL], names: [String], deviceIDs: [String]) {
+        let fm = fileManagerController
+        if pane == .mac {
+            fm.clipboard.copyLocal(localURLs, names: names, from: .mac)
+        } else {
+            fm.clipboard.copyDevice(ids: deviceIDs, names: names, from: .garmin)
+        }
+        fm.focusedPane = pane
+    }
+
+    func fileManagerCutSelection(from pane: FileManagerPane, localURLs: [URL], names: [String], deviceIDs: [String]) {
+        let fm = fileManagerController
+        if pane == .mac {
+            fm.clipboard.cutLocal(localURLs, names: names, from: .mac)
+        } else {
+            fm.clipboard.cutDevice(ids: deviceIDs, names: names, from: .garmin)
+        }
+        fm.focusedPane = pane
+    }
+
+    func fileManagerPaste(into pane: FileManagerPane, localFolder: URL?) {
+        let clip = fileManagerController.clipboard
+        guard !clip.isEmpty else { return }
+        fileManagerController.focusedPane = pane
+
+        if pane == .mac, let folder = localFolder {
+            if !clip.localURLs.isEmpty {
+                do {
+                    let result = clip.mode == .cut
+                        ? try LocalFileOperations.move(clip.localURLs, to: folder)
+                        : try LocalFileOperations.copy(clip.localURLs, to: folder)
+                    fileManagerController.pushUndo(result.undo)
+                    clip.consumeIfCut()
+                    presentNotice(.success, title: "Paste complete", message: result.message)
+                } catch {
+                    presentNotice(.error, title: "Paste failed", message: error.localizedDescription)
+                }
+            } else if !clip.deviceFileIDs.isEmpty {
+                handleUnifiedDrop(
+                    items: DragItemSet(
+                        localURLs: [],
+                        deviceFileIDs: clip.deviceFileIDs,
+                        sourceKind: .device,
+                        totalByteCount: 0,
+                        displayNames: clip.displayNames
+                    ),
+                    destination: .localFolder(folder),
+                    destinationLabel: folder.path,
+                    sourceLabel: "Garmin"
+                )
+                if clip.mode == .cut {
+                    // Cut from watch → Mac requires confirm before deleting originals.
+                    pendingDragMoveDeleteIDs = clip.deviceFileIDs
+                    showDragMoveDeleteConfirmation = true
+                    clip.clear()
+                }
+            }
+            return
+        }
+
+        if pane == .garmin {
+            if !clip.localURLs.isEmpty {
+                handleUnifiedDrop(
+                    items: DragItemSet(
+                        localURLs: clip.localURLs,
+                        deviceFileIDs: [],
+                        sourceKind: .localFolder,
+                        totalByteCount: 0,
+                        displayNames: clip.displayNames
+                    ),
+                    destination: .deviceMusicRoot,
+                    destinationLabel: "Garmin music library",
+                    sourceLabel: "Mac"
+                )
+                clip.consumeIfCut()
+            } else if !clip.deviceFileIDs.isEmpty {
+                // In-watch paste: emulate move/copy via Move Within Garmin sheet for playlists,
+                // or notify that folder paste uses Move Within Garmin.
+                deviceBrowser.selectedFileIDs = Set(clip.deviceFileIDs)
+                if clip.mode == .cut {
+                    presentEmulationNotice(.move)
+                    startMoveSelectedWithinGarmin()
+                } else {
+                    presentNotice(
+                        .info,
+                        title: "Copy on watch",
+                        message: "Use Move Within Garmin or download then re-upload to duplicate tracks on the watch."
+                    )
+                }
+                clip.consumeIfCut()
+            }
+        }
+    }
+
+    func presentEmulationNotice(_ kind: MTPEmulationKind, detail: String? = nil) {
+        let notice = MTPEmulationLayer.notice(for: kind, detail: detail)
+        fileManagerController.presentEmulation(notice, notify: librarySettings.notifyOnMTPEmulation) { title, message in
+            presentNotice(.info, title: title, message: message)
+        }
+    }
+
+    func createDeviceFolder(named name: String) {
+        presentEmulationNotice(.createFolder)
+        Task {
+            isManagingDeviceFiles = true
+            defer { isManagingDeviceFiles = false }
+            let result = await deviceBrowser.createFolder(named: name)
+            if let result, result.failedItems.isEmpty {
+                presentNotice(.success, title: "Folder created", message: result.message)
+            }
+        }
+    }
+
+    func renameSelectedDeviceFile(to newName: String) {
+        guard let file = deviceBrowser.selectedFiles.first else { return }
+        presentEmulationNotice(.rename)
+        Task {
+            isManagingDeviceFiles = true
+            defer { isManagingDeviceFiles = false }
+            let result = await deviceBrowser.rename(file, to: newName)
+            if let result, result.failedItems.isEmpty {
+                presentNotice(.success, title: "Renamed", message: result.message)
+            }
+        }
+    }
+
+    func quickLookSelectedDeviceFiles() {
+        let files = deviceBrowser.selectedFiles.filter { $0.type != .folder }
+        guard !files.isEmpty else { return }
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gmm-ql-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        downloadDeviceFiles(withIDs: files.map(\.id), to: temp)
+        Task { @MainActor in
+            // Give download a moment; QL opens whatever landed.
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            let urls = (try? FileManager.default.contentsOfDirectory(at: temp, includingPropertiesForKeys: nil)) ?? []
+            if !urls.isEmpty {
+                QuickLookPresenter.preview(urls: urls)
+            }
+        }
+    }
+
+    func zipSelectedDeviceFilesToMac(folder: URL) {
+        let files = deviceBrowser.selectedFiles.filter { $0.type != .folder }
+        guard !files.isEmpty else { return }
+        presentEmulationNotice(.zipRoundTrip)
+        let temp = FileManager.default.temporaryDirectory
+            .appendingPathComponent("gmm-zip-\(UUID().uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+        downloadDeviceFiles(withIDs: files.map(\.id), to: temp)
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            let urls = (try? FileManager.default.contentsOfDirectory(at: temp, includingPropertiesForKeys: nil)) ?? []
+            guard !urls.isEmpty else { return }
+            do {
+                let zip = try LocalFileOperations.compress(urls, into: folder)
+                presentNotice(.success, title: "Archive created", message: zip.lastPathComponent)
+            } catch {
+                presentNotice(.error, title: "Zip failed", message: error.localizedDescription)
+            }
+        }
+    }
+
+    func executePendingSyncPlan(macFolder: URL) {
+        guard let plan = fileManagerController.pendingSyncPlan else { return }
+        fileManagerController.showSyncConfirm = false
+        fileManagerController.showMirrorConfirm = false
+        let items = plan.items
+        fileManagerController.pendingSyncPlan = nil
+
+        let copyLocals = items.compactMap { item -> URL? in
+            guard item.kind == .copy else { return nil }
+            return item.sourceLocalURL
+        }
+        let copyDeviceIDs = items.compactMap { item -> String? in
+            guard item.kind == .copy else { return nil }
+            return item.sourceDeviceFileID
+        }
+        let deleteLocals = items.compactMap { item -> URL? in
+            guard item.kind == .delete else { return nil }
+            return item.sourceLocalURL
+        }
+        let deleteDeviceIDs = items.compactMap { item -> String? in
+            guard item.kind == .delete else { return nil }
+            return item.sourceDeviceFileID
+        }
+
+        switch plan.action {
+        case .copyLeftToRight, .syncNewerLeftToRight, .mirrorLeftToRight:
+            // Left = Garmin, right = Mac in File Manager layout.
+            if !copyDeviceIDs.isEmpty {
+                downloadDeviceFiles(withIDs: copyDeviceIDs, to: macFolder)
+            }
+            if !deleteLocals.isEmpty {
+                _ = try? LocalFileOperations.trash(deleteLocals)
+            }
+        case .copyRightToLeft, .syncNewerRightToLeft, .mirrorRightToLeft:
+            if !copyLocals.isEmpty {
+                uploadFilesToDevice(copyLocals)
+            }
+            if !deleteDeviceIDs.isEmpty {
+                deviceBrowser.selectedFileIDs = Set(deleteDeviceIDs)
+                deleteSelectedDeviceFiles()
+            }
+        }
+
+        presentNotice(
+            .info,
+            title: "Sync started",
+            message: "\(plan.copyCount) copy, \(plan.deleteCount) delete — \(plan.action.title)"
+        )
+    }
+
+    func cancelPendingSyncPlan() {
+        fileManagerController.pendingSyncPlan = nil
+        fileManagerController.showSyncConfirm = false
+        fileManagerController.showMirrorConfirm = false
+        fileManagerController.mirrorAcknowledged = false
+    }
+
+    private func makeDragDropCoordinator() -> DragDropCoordinator {
+        DragDropCoordinator(
+            hosts: DragDropCoordinator.Hosts(
+                uploadFilesToDevice: { [weak self] urls in
+                    self?.uploadFilesToDevice(urls)
+                },
+                downloadDeviceFiles: { [weak self] ids, folder in
+                    self?.downloadDeviceFiles(withIDs: ids, to: folder)
+                },
+                deleteSelectedDeviceFiles: { [weak self] in
+                    self?.deleteSelectedDeviceFiles()
+                },
+                selectDeviceFileIDs: { [weak self] ids in
+                    self?.deviceBrowser.selectedFileIDs = ids
+                },
+                startMoveWithinGarmin: { [weak self] in
+                    self?.startMoveSelectedWithinGarmin()
+                },
+                moveWithinGarminToPlaylist: { [weak self] name in
+                    self?.moveSelectedWithinGarmin(toPlaylist: name)
+                },
+                addFilesToQueue: { [weak self] urls in
+                    await self?.addFiles(urls)
+                },
+                presentNotice: { [weak self] kind, title, message in
+                    self?.presentNotice(kind, title: title, message: message)
+                },
+                requestDeleteConfirmationAfterDownload: { [weak self] ids in
+                    self?.pendingDragMoveDeleteIDs = ids
+                    self?.showDragMoveDeleteConfirmation = true
+                },
+                isDeviceConfigured: { [weak self] in
+                    self?.deviceBrowser.isConfigured ?? false
+                },
+                availableCapacity: { [weak self] in
+                    self?.deviceBrowser.storageInfo?.availableCapacity
+                },
+                syncOverwritePolicy: { [weak self] in
+                    self?.syncSettings.overwritePolicy ?? .skipIdentical
+                },
+                largeFileWarningBytes: { [weak self] in
+                    self?.librarySettings.largeFileWarningBytes ?? 250_000_000
+                },
+                storageExceedPolicy: { [weak self] in
+                    self?.librarySettings.storageExceedPolicy ?? .warnOnly
+                },
+                isBusy: { [weak self] in
+                    guard let self else { return true }
+                    return self.isManagingDeviceFiles || self.isSyncing || self.isBrowsingDevice
+                },
+                destinationIsReady: { [weak self] in
+                    self?.destinationIsReady ?? false
+                }
+            )
+        )
+    }
+
     func startMoveSelectedWithinGarmin() {
         let files = selectedDeviceFiles
         guard !files.isEmpty else { return }
@@ -1222,6 +1563,7 @@ final class AppModel: ObservableObject {
             connectedUSBDevices: connectedUSBDevices,
             connectedMTPDeviceName: connectedMTPDeviceName,
             advancedStorageExplorerEnabled: advancedStorageExplorerEnabled,
+            includePlaylistContents: performanceSettings.includePlaylistContentsWhenBrowsing,
             isBrowsingDevice: isBrowsingDevice,
             isManagingDeviceFiles: isManagingDeviceFiles,
             setBrowsing: { [weak self] value in self?.isBrowsingDevice = value },
@@ -1635,6 +1977,7 @@ final class AppModel: ObservableObject {
             connectedUSBDevices: connectedUSBDevices,
             connectedMTPDeviceName: connectedMTPDeviceName,
             advancedStorageExplorerEnabled: advancedStorageExplorerEnabled,
+            includePlaylistContents: performanceSettings.includePlaylistContentsWhenBrowsing,
             log: { [weak self] message in self?.appendLog(message) }
         )
     }

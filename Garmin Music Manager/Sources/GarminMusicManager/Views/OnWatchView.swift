@@ -11,7 +11,7 @@ struct OnWatchView: View {
             if !model.destinationIsReady && model.connectedUSBDevices.isEmpty {
                 disconnectedState
             } else {
-                DeviceContentsView(showsPanelHeader: false)
+                DeviceContentsView(showsPanelHeader: false, enablesOutboundDrag: true)
             }
         }
         .onAppear {

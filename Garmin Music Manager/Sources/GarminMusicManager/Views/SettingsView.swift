@@ -43,6 +43,21 @@ struct SettingsView: View {
             }
 
             Section {
+                Toggle("Notify on MTP emulation", isOn: libraryBinding(\.notifyOnMTPEmulation))
+                Text("Show a notice when Watch rename, new folder, move, or zip uses slower emulated MTP steps.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Toggle("Show hidden files in File Manager", isOn: libraryBinding(\.fileManagerShowHiddenFiles))
+                Toggle("Recursive search by default", isOn: libraryBinding(\.fileManagerRecursiveSearch))
+                Picker("File Manager view", selection: libraryBinding(\.fileManagerViewMode)) {
+                    Text("List").tag(LocalViewMode.list.rawValue)
+                    Text("Icons").tag(LocalViewMode.icons.rawValue)
+                }
+            } header: {
+                Label("File Manager", systemImage: "rectangle.split.2x1")
+            }
+
+            Section {
                 TextField("Default playlist name", text: $model.playlistName)
             } header: {
                 Label("Defaults", systemImage: "textformat")

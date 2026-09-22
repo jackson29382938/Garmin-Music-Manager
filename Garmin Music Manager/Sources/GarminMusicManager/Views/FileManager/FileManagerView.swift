@@ -9,8 +9,14 @@ struct FileManagerView: View {
     @State private var macMode: FileManagerMacMode = .folders
     @State private var didRestorePersistedState = false
 
+    private var fm: FileManagerController { model.fileManagerController }
+
     var body: some View {
         VStack(spacing: 0) {
+            syncToolbar
+            if let banner = fm.lastEmulationBanner {
+                emulationBanner(banner)
+            }
             HSplitView {
                 garminPane
                     .frame(minWidth: 320)
@@ -33,6 +39,161 @@ struct FileManagerView: View {
         }
         .onChange(of: folderBrowser.currentFolder) { _, folder in
             persistFolder(folder)
+        }
+        .confirmationDialog(
+            syncConfirmTitle,
+            isPresented: Binding(
+                get: { fm.showSyncConfirm },
+                set: { fm.showSyncConfirm = $0 }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Run Sync") {
+                model.executePendingSyncPlan(macFolder: folderBrowser.currentFolder)
+                folderBrowser.refresh()
+            }
+            Button("Cancel", role: .cancel) {
+                model.cancelPendingSyncPlan()
+            }
+        } message: {
+            Text(syncConfirmMessage)
+        }
+        .sheet(isPresented: Binding(
+            get: { fm.showMirrorConfirm },
+            set: { if !$0 { model.cancelPendingSyncPlan() } else { fm.showMirrorConfirm = $0 } }
+        )) {
+            mirrorConfirmSheet
+        }
+    }
+
+    private var syncToolbar: some View {
+        HStack(spacing: 8) {
+            Text("Dual-pane")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Button("Compare") { comparePanes() }
+            Button("Copy →") { planSync(.copyLeftToRight) }
+            Button("Copy ←") { planSync(.copyRightToLeft) }
+            Button("Sync newer →") { planSync(.syncNewerLeftToRight) }
+            Button("Sync newer ←") { planSync(.syncNewerRightToLeft) }
+            Button("Mirror →", role: .destructive) { planSync(.mirrorLeftToRight) }
+            Button("Mirror ←", role: .destructive) { planSync(.mirrorRightToLeft) }
+            Spacer()
+            if let summary = fm.compareSummary {
+                Text(summary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+            }
+            if !fm.clipboard.isEmpty {
+                Text(fm.clipboard.summary)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .controlBackgroundColor))
+    }
+
+    private func emulationBanner(_ text: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "info.circle.fill")
+                .foregroundStyle(.orange)
+            Text(text)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Dismiss") { fm.clearEmulationBanner() }
+                .buttonStyle(.borderless)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 6)
+        .background(Color.orange.opacity(0.12))
+    }
+
+    private var syncConfirmTitle: String {
+        guard let plan = fm.pendingSyncPlan else { return "Confirm sync" }
+        return "\(plan.action.title): \(plan.copyCount) copy, \(plan.deleteCount) delete"
+    }
+
+    private var syncConfirmMessage: String {
+        guard let plan = fm.pendingSyncPlan else { return "" }
+        let bytes = ByteCountFormatter.string(fromByteCount: plan.totalBytes, countStyle: .file)
+        return "About \(bytes) will transfer. Overwrite policy from Settings still applies."
+    }
+
+    private var mirrorConfirmSheet: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Mirror can delete files")
+                .font(.headline)
+            Text("This will copy missing/different items and delete extras on the destination that are not on the source.")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+            if let plan = fm.pendingSyncPlan {
+                Text("\(plan.copyCount) to copy, \(plan.deleteCount) to delete.")
+                    .font(.caption)
+            }
+            Toggle("I understand this can permanently delete files", isOn: Binding(
+                get: { fm.mirrorAcknowledged },
+                set: { fm.mirrorAcknowledged = $0 }
+            ))
+            HStack {
+                Spacer()
+                Button("Cancel") { model.cancelPendingSyncPlan() }
+                Button("Mirror", role: .destructive) {
+                    model.executePendingSyncPlan(macFolder: folderBrowser.currentFolder)
+                    folderBrowser.refresh()
+                }
+                .disabled(!fm.mirrorAcknowledged)
+            }
+        }
+        .padding(20)
+        .frame(width: 420)
+    }
+
+    // MARK: - Sync planning
+
+    private func comparePanes() {
+        let left = garminListing()
+        let right = macListing()
+        let onlyLeft = Set(left.map { $0.name.lowercased() }).subtracting(right.map { $0.name.lowercased() })
+        let onlyRight = Set(right.map { $0.name.lowercased() }).subtracting(left.map { $0.name.lowercased() })
+        fm.compareSummary = "Garmin-only \(onlyLeft.count) · Mac-only \(onlyRight.count) · Shared \(left.count + right.count - onlyLeft.count - onlyRight.count)"
+    }
+
+    private func planSync(_ action: DualPaneSyncAction) {
+        let plan = DualPaneSyncPlanner.plan(action: action, left: garminListing(), right: macListing())
+        if plan.items.isEmpty {
+            fm.compareSummary = "Nothing to do for \(action.title)"
+            return
+        }
+        fm.presentSyncPlan(plan)
+    }
+
+    private func garminListing() -> [SyncListingItem] {
+        model.deviceBrowser.displayedFiles.map { file in
+            SyncListingItem(
+                name: file.name,
+                size: file.size,
+                modified: file.modifiedDate,
+                isDirectory: file.type == .folder,
+                localURL: nil,
+                deviceFileID: file.id
+            )
+        }
+    }
+
+    private func macListing() -> [SyncListingItem] {
+        folderBrowser.entries.map { entry in
+            SyncListingItem(
+                name: entry.name,
+                size: entry.size,
+                modified: entry.modifiedDate,
+                isDirectory: entry.isDirectory,
+                localURL: entry.url,
+                deviceFileID: nil
+            )
         }
     }
 
@@ -69,6 +230,7 @@ struct FileManagerView: View {
             }
         }
         .background(AppTheme.panelBackground(for: .garmin).opacity(0.35))
+        .onTapGesture { fm.focusedPane = .garmin }
     }
 
     private var garminDisconnected: some View {
@@ -109,6 +271,7 @@ struct FileManagerView: View {
                 ensureAppleMusicLoaded()
             }
         )
+        .onTapGesture { fm.focusedPane = .mac }
     }
 
     // MARK: - Persistence / load
@@ -118,11 +281,19 @@ struct FileManagerView: View {
         if let mode = FileManagerMacMode(rawValue: settings.fileManagerMacMode) {
             macMode = mode
         }
+        folderBrowser.applySettings(settings)
         if let path = settings.fileManagerLastFolderPath {
             let url = URL(fileURLWithPath: path)
             if folderBrowser.currentFolder.standardizedFileURL != url.standardizedFileURL {
                 folderBrowser.navigate(to: url)
             }
+        }
+        if !settings.fileManagerMacTabPaths.isEmpty {
+            for (index, path) in settings.fileManagerMacTabPaths.enumerated() {
+                fm.macTabs.open(URL(fileURLWithPath: path), inNewTab: index > 0)
+            }
+        } else {
+            fm.macTabs.open(folderBrowser.currentFolder, inNewTab: false)
         }
         if macMode == .appleMusic {
             ensureAppleMusicLoaded()
@@ -138,6 +309,7 @@ struct FileManagerView: View {
     private func persistFolder(_ folder: URL) {
         var lib = model.librarySettings
         lib.fileManagerLastFolderPath = folder.path
+        lib.fileManagerMacTabPaths = fm.macTabs.tabs.map(\.path)
         model.librarySettings = lib
     }
 

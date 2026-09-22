@@ -17,6 +17,7 @@ final class DeviceOperationsCoordinator {
         connectedUSBDevices: [GarminUSBDevice],
         connectedMTPDeviceName: String?,
         advancedStorageExplorerEnabled: Bool,
+        includePlaylistContents: Bool = false,
         log: (String) -> Void
     ) -> Bool {
         if deviceBrowser.isConfigured {
@@ -40,7 +41,8 @@ final class DeviceOperationsCoordinator {
                 deviceBrowser: deviceBrowser,
                 connectedUSBDevices: connectedUSBDevices,
                 connectedMTPDeviceName: connectedMTPDeviceName,
-                advancedStorageExplorerEnabled: advancedStorageExplorerEnabled
+                advancedStorageExplorerEnabled: advancedStorageExplorerEnabled,
+                includePlaylistContents: includePlaylistContents
             )
             return true
         }

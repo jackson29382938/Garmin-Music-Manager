@@ -633,7 +633,15 @@ struct AppleMusicLibraryBrowser: View {
 
     private func dragProvider(including track: LibraryTrack) -> NSItemProvider {
         prepareSelection(for: track)
-        return MultiFileDragPayload.itemProvider(for: selectedImportableURLs)
+        let urls = selectedImportableURLs
+        let items = DragItemSet(
+            localURLs: urls,
+            deviceFileIDs: [],
+            sourceKind: .appleMusic,
+            totalByteCount: 0,
+            displayNames: urls.map(\.lastPathComponent)
+        )
+        return UnifiedDragPayload.itemProvider(for: items)
     }
 
     @ViewBuilder

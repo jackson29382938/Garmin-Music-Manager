@@ -70,6 +70,7 @@ final class DeviceSessionController {
         connectedUSBDevices: [GarminUSBDevice],
         connectedMTPDeviceName: String?,
         advancedStorageExplorerEnabled: Bool,
+        includePlaylistContents: Bool = false,
         log: (String) -> Void
     ) -> Bool {
         deviceOperationsCoordinator.prepareDeviceBrowserForUpload(
@@ -81,6 +82,7 @@ final class DeviceSessionController {
             connectedUSBDevices: connectedUSBDevices,
             connectedMTPDeviceName: connectedMTPDeviceName,
             advancedStorageExplorerEnabled: advancedStorageExplorerEnabled,
+            includePlaylistContents: includePlaylistContents,
             log: log
         )
     }
@@ -157,6 +159,7 @@ final class DeviceSessionController {
         connectedUSBDevices: [GarminUSBDevice],
         connectedMTPDeviceName: String?,
         advancedStorageExplorerEnabled: Bool,
+        includePlaylistContents: Bool = false,
         isBrowsingDevice: Bool,
         isManagingDeviceFiles: Bool,
         setBrowsing: @escaping (Bool) -> Void,
@@ -182,7 +185,8 @@ final class DeviceSessionController {
             deviceBrowser: deviceBrowser,
             connectedUSBDevices: connectedUSBDevices,
             connectedMTPDeviceName: connectedMTPDeviceName,
-            advancedStorageExplorerEnabled: advancedStorageExplorerEnabled
+            advancedStorageExplorerEnabled: advancedStorageExplorerEnabled,
+            includePlaylistContents: includePlaylistContents
         )
         setBrowsing(true)
         if force {

@@ -102,6 +102,25 @@ struct ContentView: View {
         } message: {
             Text("The files were copied to the new Garmin folder. Delete the original copies to complete the move.")
         }
+        .alert("Delete originals on watch?", isPresented: $model.showDragMoveDeleteConfirmation) {
+            Button("Delete from Watch", role: .destructive) {
+                model.confirmDragMoveDeleteFromWatch()
+            }
+            Button("Keep on Watch", role: .cancel) {
+                model.cancelDragMoveDeleteFromWatch()
+            }
+        } message: {
+            Text("Files were copied to the Mac. Delete the originals on the Garmin to finish the move?")
+        }
+        .sheet(isPresented: Binding(
+            get: { model.dragDropSession.pendingConfirm != nil },
+            set: { if !$0 { model.cancelPendingDrop() } }
+        )) {
+            if let request = model.dragDropSession.pendingConfirm {
+                DropConfirmSheet(request: request)
+                    .environmentObject(model)
+            }
+        }
         .onChange(of: model.shouldFocusOnWatch) { _, focus in
             guard focus else { return }
             mode = .onWatch
@@ -119,6 +138,7 @@ struct ContentView: View {
             mode = .transfer
             model.consumeFocusTransfer()
         }
+        .environmentObject(model.dragDropSession)
     }
 
     // MARK: - Left rail
@@ -177,15 +197,26 @@ struct ContentView: View {
                         .padding(.vertical, 8)
                         .padding(.horizontal, 10)
                         .background(
-                            mode == appMode
-                                ? Color.primary.opacity(0.08)
-                                : Color.clear,
+                            railBackground(for: appMode),
                             in: RoundedRectangle(cornerRadius: 8, style: .continuous)
                         )
+                        .overlay {
+                            if model.dragDropSession.isDragging,
+                               appMode == .onWatch || appMode == .fileManager {
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .strokeBorder(AppTheme.garminTint.opacity(0.7), lineWidth: 1.5)
+                            }
+                        }
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(mode == appMode ? .primary : .secondary)
                 .accessibilityAddTraits(mode == appMode ? .isSelected : [])
+                .onDrop(
+                    of: UnifiedDragPayload.dropTypeIdentifiers,
+                    isTargeted: nil
+                ) { providers in
+                    handleRailDrop(providers, targetMode: appMode)
+                }
             }
 
             Spacer()
@@ -272,6 +303,28 @@ struct ContentView: View {
             return model.mtpDependencyStatus.isReady ? "Detected" : "Needs MTP"
         }
         return "Not connected"
+    }
+
+    private func railBackground(for appMode: AppMode) -> Color {
+        if mode == appMode {
+            return Color.primary.opacity(0.08)
+        }
+        if model.dragDropSession.highlightedRailMode == appMode {
+            return AppTheme.garminTint.opacity(0.15)
+        }
+        return Color.clear
+    }
+
+    /// Rail drop switches to the tab and highlights its drop zone (does not auto-transfer).
+    private func handleRailDrop(_ providers: [NSItemProvider], targetMode: AppMode) -> Bool {
+        guard targetMode == .onWatch || targetMode == .fileManager else { return false }
+        UnifiedDragPayload.load(from: providers) { items in
+            guard !items.isEmpty else { return }
+            model.dragDropSession.beginDrag(items)
+            model.dragDropSession.requestRailSwitch(to: targetMode)
+            mode = targetMode
+        }
+        return true
     }
 }
 

@@ -447,6 +447,57 @@ final class DeviceBrowserStore: ObservableObject {
         }
     }
 
+    @discardableResult
+    func createFolder(named name: String, parentPath: String? = nil) async -> DeviceFileOperationResult? {
+        guard let backend else { return nil }
+        let parent = parentPath
+            ?? selectedCollection?.name
+            ?? (browseMode == .advancedStorage ? "" : "Music")
+        operation = DeviceOperation(
+            kind: .upload,
+            phase: "Creating folder “\(name)”",
+            progress: nil,
+            canCancel: backend.backendKind == .mtp
+        )
+        do {
+            let result = try await backend.createFolder(named: name, parentPath: parent)
+            invalidateCurrentCache()
+            applyOperationResult(result, kind: .upload, successMessage: result.message ?? "Folder created.")
+            await refresh(force: true)
+            return result
+        } catch {
+            applyOperationError(error, kind: .upload)
+            return nil
+        }
+    }
+
+    @discardableResult
+    func renameSelected(to newName: String) async -> DeviceFileOperationResult? {
+        guard let file = selectedFiles.first else { return nil }
+        return await rename(file, to: newName)
+    }
+
+    @discardableResult
+    func rename(_ file: DeviceFile, to newName: String) async -> DeviceFileOperationResult? {
+        guard let backend else { return nil }
+        operation = DeviceOperation(
+            kind: .move,
+            phase: "Renaming “\(file.name)”",
+            progress: nil,
+            canCancel: backend.backendKind == .mtp
+        )
+        do {
+            let result = try await backend.rename(file, to: newName)
+            invalidateCurrentCache()
+            applyOperationResult(result, kind: .move, successMessage: result.message ?? "Rename complete.")
+            await refresh(force: true)
+            return result
+        } catch {
+            applyOperationError(error, kind: .move)
+            return nil
+        }
+    }
+
     func invalidateCurrentCache() {
         guard let backend else { return }
         cache.removeValue(forKey: CacheKey(deviceID: backend.deviceID, mode: browseMode))
